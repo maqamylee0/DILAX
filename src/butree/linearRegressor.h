@@ -1,5 +1,7 @@
-#ifndef DILI_LINEARREGRESSOR_H
-#define DILI_LINEARREGRESSOR_H
+#ifndef DILAX_LINEARREGRESSOR_H
+#define DILAX_LINEARREGRESSOR_H
+
+namespace dilax {
 
 struct linearRegressor {
     double a;
@@ -43,5 +45,6 @@ private:
     void print_cal_ab(int fanout);
 };
 
+} // namespace dilax
 
-#endif // DILI_LINEARREGRESSOR_H
+#endif // DILAX_LINEARREGRESSOR_H

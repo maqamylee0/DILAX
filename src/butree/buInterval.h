@@ -1,7 +1,9 @@
 #include "interval.h"
 
-#ifndef DILI_LRINTERVAL_H
-#define DILI_LRINTERVAL_H
+#ifndef DILAX_LRINTERVAL_H
+#define DILAX_LRINTERVAL_H
+
+namespace dilax {
 
 struct buInterval: public interval {
     linearRegressor *merge_lr;
@@ -28,4 +30,6 @@ struct buInterval: public interval {
     }
 };
 
-#endif // DILI_LRINTERVAL_H
+} // namespace dilax
+
+#endif // DILAX_LRINTERVAL_H

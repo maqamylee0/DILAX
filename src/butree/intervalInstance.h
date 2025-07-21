@@ -3,8 +3,10 @@
 #include <string>
 using namespace std;
 
-#ifndef DILI_INTERVALINSTANCE_H
-#define DILI_INTERVALINSTANCE_H
+#ifndef DILAX_INTERVALINSTANCE_H
+#define DILAX_INTERVALINSTANCE_H
+
+namespace dilax {
 
 struct intervalInstance {
     static interval* newInstance(int type) {
@@ -18,4 +20,6 @@ struct intervalInstance {
     }
 };
 
-#endif // DILI_INTERVALINSTANCE_H
+} // namespace dilax
+
+#endif // DILAX_INTERVALINSTANCE_H

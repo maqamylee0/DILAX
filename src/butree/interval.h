@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#ifndef DILI_INTERVAL_H
-#define DILI_INTERVAL_H
+#ifndef DILAX_INTERVAL_H
+#define DILAX_INTERVAL_H
+
+namespace dilax {
 
 struct interval{
     static const keyType *data;
@@ -65,4 +67,6 @@ struct interval{
 
 };
 
-#endif // DILI_INTERVAL_H
+} // namespace dilax
+
+#endif // DILAX_INTERVAL_H

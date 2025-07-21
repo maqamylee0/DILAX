@@ -1,4 +1,4 @@
-#include "diliNode.h"
+#include "dilaxNode.h"
 #include "../butree/interval_utils.h"
 #include "../global/global.h"
 #include "../utils/data_utils.h"
@@ -9,19 +9,19 @@
 #include <string>
 #include <iostream>
 #include <stack>
-#ifndef DILI_DILI_H
-#define DILI_DILI_H
+#ifndef DILAX_DILAX_H
+#define DILAX_DILAX_H
 
 
-namespace diliFunc {
-    pair<diliNode **, double *>
-    create_children(const int &height, diliNode **parents, int n_parents, double *parents_range_froms,
+namespace dilaxFunc {
+    pair<dilaxNode **, double *>
+    create_children(const int &height, dilaxNode **parents, int n_parents, double *parents_range_froms,
                     keyType *split_keys_for_children, recordPtr *ptrs, int n_keys,
                     int &act_total_N_children);
 }
 
-class DILI {
-    diliNode *root;
+class DILAX {
+    dilaxNode *root;
     string mirror_dir;
 
 public:
@@ -31,22 +31,22 @@ public:
                 [&] { bulk_load(data); });
     }
 
-    SearchBound EqualityLookup(const keyType &lookup_key) const {
+    DilaxSearchBound EqualityLookup(const keyType &lookup_key) const {
         const uint64_t start = search(lookup_key);
         const uint64_t stop = start + 1;
 
-        return (SearchBound){start, stop};
+        return (DilaxSearchBound){start, stop};
     }
 
-    std::string name() const { return "DILI"; }
+    std::string name() const { return "DILAX"; }
 
     std::size_t size() const { return total_size(); }
 
     // ---------------------
-    DILI(): root(NULL) {
+    DILAX(): root(NULL) {
         init_insert_aux_vars();
     }
-    ~DILI() {
+    ~DILAX() {
         clear();
     }
 
@@ -60,11 +60,11 @@ public:
 
 
     void init_insert_aux_vars() {
-        dili_auxiliary::init_insert_aux_vars();
+        dilax_auxiliary::init_insert_aux_vars();
     }
 
     void free_insert_aux_vars() {
-        dili_auxiliary::free_insert_aux_vars();
+        dilax_auxiliary::free_insert_aux_vars();
     }
 
     void set_mirror_dir(const std::string &dir) { mirror_dir = dir; }
@@ -93,7 +93,7 @@ public:
             split_keys_list[height] = split_keys;
             data_utils::check(split_keys, n_split_keys+1);
         }
-        root = new diliNode(true);
+        root = new dilaxNode(true);
 //    root->set_range(0, all_keys[N-1] + 1);
         int n_keys = n_nodes_each_level_mirror[H - 2];
         root->fanout = n_keys + 1;
@@ -103,11 +103,11 @@ public:
         root->a = -(root->b * lbd);
         n_nodes_each_level.push_back(1);
 //    root->children_init();
-        root->pe_data = new pairEntry[root->fanout];
+        root->pe_data = new dilaxPairEntry[root->fanout];
 
         keyType lastone = split_keys_list[H - 2][n_nodes_each_level_mirror[H-3]-1];
 
-        diliNode **parents = new diliNode*[1];
+        dilaxNode **parents = new dilaxNode*[1];
         parents[0] = root;
         int n_parents = 1;
         double *parents_range_froms = new double[2];
@@ -115,7 +115,7 @@ public:
         parents_range_froms[1] = all_keys[N-1] + 1;
 
         // height: the height of parents
-        diliNode **children = NULL;
+        dilaxNode **children = NULL;
         int act_total_N_children = 0;
 
         for (int height = H - 1; height > 0; --height) {
@@ -129,7 +129,7 @@ public:
                 ptrs = all_ptrs.get();
             }
 
-            pair<diliNode **, double *> _pair = diliFunc::create_children(height, parents, n_parents, parents_range_froms, split_keys_list[height-1],
+            pair<dilaxNode **, double *> _pair = dilaxFunc::create_children(height, parents, n_parents, parents_range_froms, split_keys_list[height-1],
                                                                           ptrs, n_keys, act_total_N_children);
             children = _pair.first;
             double *children_range_froms = _pair.second;
@@ -150,7 +150,7 @@ public:
         delete[] split_keys_list;
 
         for (long i = 0; i < N; ++i) {
-            diliNode *leaf = find_leaf(all_keys[i]);
+            dilaxNode *leaf = find_leaf(all_keys[i]);
 //        leaf->tmp.push_back(all_keys[i]);
             leaf->inc_num_nonempty();
         }
@@ -158,7 +158,7 @@ public:
         long start_idx = 0;
         bool print = false;
         for (int i = 0; i < act_total_N_children; ++i) {
-            diliNode *leaf = children[i];
+            dilaxNode *leaf = children[i];
             int _num_nonempty = leaf->num_nonempty;
             leaf->bulk_loading(all_keys.get() + start_idx, all_ptrs.get() + start_idx, print);
             start_idx += _num_nonempty;
@@ -180,20 +180,20 @@ public:
     }
 
     size_t total_size() const{
-        std::stack<diliNode*> s;
+        std::stack<dilaxNode*> s;
         s.push(root);
 
         size_t size = 0;
-        size_t delta = sizeof(diliNode);
+        size_t delta = sizeof(dilaxNode);
         while (!s.empty()) {
-            diliNode* node = s.top(); s.pop();
+            dilaxNode* node = s.top(); s.pop();
 
             size += delta;
             if (!(node->is_internal())) {
                 size += node->num_nonempty * 2 * sizeof(long);
             } else {
                 for (int i = 0; i < node->fanout; ++i) {
-                    pairEntry &kp = node->pe_data[i];
+                    dilaxPairEntry &kp = node->pe_data[i];
                     if (kp.key < 0) {
                         if (kp.key == -1) {
                             s.push(kp.child);
@@ -232,16 +232,16 @@ public:
 
     void save(const string &path);
     void load(const string &path);
-    diliNode* loadNode(FILE *fp);
+    dilaxNode* loadNode(FILE *fp);
 
 
     // only called on bulk loading stage
-    inline diliNode* find_leaf(const keyType &key) {
-        diliNode *node = root->find_child(key);
+    inline dilaxNode* find_leaf(const keyType &key) {
+        dilaxNode *node = root->find_child(key);
         while (node->is_internal()) {
             node = node->find_child(key);
         }
-        return static_cast<diliNode*>(node);
+        return static_cast<dilaxNode*>(node);
     }
 
 
@@ -249,10 +249,10 @@ public:
     inline long search(const keyType &key) const{
 //        std::cout << "******key = " << key << std::endl;
 
-        diliNode *node = root;
+        dilaxNode *node = root;
         while (true) {
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            pairEntry &kp = node->pe_data[pred];
+            dilaxPairEntry &kp = node->pe_data[pred];
             if (kp.key == key) {
                 return kp.ptr;
             } else if (kp.key == -1) {
@@ -283,4 +283,4 @@ public:
 
 
 
-#endif //DILI_DILI_H
+#endif //DILAX_DILAX_H

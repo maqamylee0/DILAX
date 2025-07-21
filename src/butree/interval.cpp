@@ -2,11 +2,12 @@
 #include <cassert>
 #include <iostream>
 using namespace std;
+using namespace dilax;
 
 const long *interval::data = NULL;
 const double *interval::probs = NULL;
 
-double interval::init_lr(bool force_init) {
+double dilax::interval::init_lr(bool force_init) {
     if (force_init) {
         if (lr) {
             delete lr;
@@ -26,7 +27,7 @@ double interval::init_lr(bool force_init) {
     }
 }
 
-double interval::init_lr_w_sampling(bool force_init) {
+double dilax::interval::init_lr_w_sampling(bool force_init) {
     if (force_init) {
         if (lr) {
             delete lr;
@@ -46,7 +47,7 @@ double interval::init_lr_w_sampling(bool force_init) {
     }
 }
 
-bool interval::check_lr_delta_x() {
+bool dilax::interval::check_lr_delta_x() {
     if (lSib) {
         if (lr && lSib->lr) {
 //            if (fanout > 0) {

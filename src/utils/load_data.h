@@ -63,20 +63,20 @@ using namespace dataset;
 namespace load_data {
 
     void _params_setting() {
-        halfN = totalDataSize / 2;
-        query_step = halfN / n_query_keys;
-        query_start_idx = query_step / 2;
+        dilax_halfN = dilax_totalDataSize / 2;
+        dilax_query_step = dilax_halfN / dilax_n_query_keys;
+        dilax_query_start_idx = dilax_query_step / 2;
     }
 
     void allocate() {
 //        cout << "calling load_data::allocate()" << endl;
 
-        query_keys = make_unique<keyType []>(n_query_keys);
-        query_ptrs = make_unique<recordPtr []>(n_query_keys);
-//        random_indices = new long[n_query_keys];
-//        first_half_sorted_indices = new long[halfN];
-//        allKeys = new keyType [totalDataSize + 2];
-//        second_half_random_indices = new long[halfN];
+        query_keys = make_unique<keyType []>(dilax_n_query_keys);
+        query_ptrs = make_unique<recordPtr []>(dilax_n_query_keys);
+//        random_indices = new long[dilax_n_query_keys];
+//        first_half_sorted_indices = new long[dilax_halfN];
+//        allKeys = new keyType [dilax_totalDataSize + 2];
+//        second_half_random_indices = new long[dilax_halfN];
     }
 
     void free_auxiliary_variables() {
@@ -116,22 +116,22 @@ namespace load_data {
         data_utils::load_data_to_uptr(first_half_sorted_indices_path.c_str(), data_utils::INT64_FLAG);
         first_half_sorted_indices = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
-//        std::cout << "totalDataSize = " << totalDataSize << std::endl;
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+//        std::cout << "dilax_totalDataSize = " << dilax_totalDataSize << std::endl;
         assert(data_utils::array_key);
         allKeys = std::move(data_utils::array_key);
-        halfN = totalDataSize / 2;
+        dilax_halfN = dilax_totalDataSize / 2;
 
-        keyType upper_bound = allKeys[totalDataSize - 1] + 1;
-        allKeys[totalDataSize] = upper_bound;
+        keyType upper_bound = allKeys[dilax_totalDataSize - 1] + 1;
+        allKeys[dilax_totalDataSize] = upper_bound;
 
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
-        for (long i = 0; i < totalDataSize; ++i) {
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
+        for (long i = 0; i < dilax_totalDataSize; ++i) {
             allPtrs[i] = i;
         }
 
-        for (int i = 0; i < n_query_keys; ++i) {
-            long j = random_indices[i] * query_step + query_start_idx;
+        for (int i = 0; i < dilax_n_query_keys; ++i) {
+            long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
             long idx = first_half_sorted_indices[j];
             query_keys[i] = allKeys[idx];
             query_ptrs[i] = allPtrs[idx];
@@ -143,7 +143,7 @@ namespace load_data {
 
 
     void range_query_data_load(const string &data_path, const string &range_query_start_idxes_path, const string &range_query_lens_path) {
-        query_ranges = make_unique<keyType []>(2 * n_query_keys);
+        query_ranges = make_unique<keyType []>(2 * dilax_n_query_keys);
         query_keys = nullptr;
         query_ptrs = nullptr;
 
@@ -153,25 +153,25 @@ namespace load_data {
         data_utils::load_data_to_uptr(range_query_lens_path.c_str(), data_utils::INT64_FLAG);
         query_lens = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
         allKeys = std::move(data_utils::array_key);
 
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
 
-        keyType upper_bound = allKeys[totalDataSize - 1] + 1;
-        allKeys[totalDataSize] = upper_bound;
+        keyType upper_bound = allKeys[dilax_totalDataSize - 1] + 1;
+        allKeys[dilax_totalDataSize] = upper_bound;
 
-        for (long i = 0; i < totalDataSize; ++i) {
+        for (long i = 0; i < dilax_totalDataSize; ++i) {
             allPtrs[i] = i;
         }
-        for (int i = 0; i < n_query_keys; ++i) {
+        for (int i = 0; i < dilax_n_query_keys; ++i) {
             long j = random_indices[i];
             long k = j + query_lens[i];
             query_ranges[2 * i] = allKeys[j];
             query_ranges[2 * i + 1] = allKeys[k];
         }
 
-        range_query_ptrs = make_unique<recordPtr []>(totalDataSize);
+        range_query_ptrs = make_unique<recordPtr []>(dilax_totalDataSize);
     }
 
     void different_card_data_load(const string &data_path, const string &random_indices_path, const string &first_half_sorted_indices_path,
@@ -182,27 +182,27 @@ namespace load_data {
 
         long _n = data_utils::load_data_to_uptr(first_half_sorted_indices_path.c_str(), data_utils::INT64_FLAG);
 //        long quater_n = _n / n_quarters;
-//        long halfN = quater_n * 2;
+//        long dilax_halfN = quater_n * 2;
         first_half_sorted_indices = std::move(data_utils::array_int64);
 
         data_utils::load_data_to_uptr(first_n_quaters_sorted_indices_path.c_str(), data_utils::INT64_FLAG);
         first_n_quaters_sorted_indices = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
-        long halfN = totalDataSize / 2;
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+        long dilax_halfN = dilax_totalDataSize / 2;
         auxiliary_keys = std::move(data_utils::array_key);
 
-        keyType upper_bound = auxiliary_keys[totalDataSize - 1] + 1;
-        auxiliary_keys[totalDataSize] = upper_bound;
+        keyType upper_bound = auxiliary_keys[dilax_totalDataSize - 1] + 1;
+        auxiliary_keys[dilax_totalDataSize] = upper_bound;
 
-        long maxIdx = n_quarters * halfN / 2;
+        long maxIdx = n_quarters * dilax_halfN / 2;
 //        if (_n != maxIdx) {
 //            cout << "_n = " << _n << ", maxIdx = " << maxIdx << endl;
 //        }
 //        assert(_n == maxIdx);
 
-        allKeys = make_unique<keyType []>(totalDataSize + 2);
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
+        allKeys = make_unique<keyType []>(dilax_totalDataSize + 2);
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
         for (long i = 0; i < maxIdx; ++i) {
             long idx = first_n_quaters_sorted_indices[i];
             allKeys[i] = auxiliary_keys[idx];
@@ -213,17 +213,17 @@ namespace load_data {
 
 
         if (n_quarters >= 2) {
-            for (int i = 0; i < n_query_keys; ++i) {
-                long j = random_indices[i] * query_step + query_start_idx;
+            for (int i = 0; i < dilax_n_query_keys; ++i) {
+                long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
                 long idx = first_half_sorted_indices[j];
                 query_keys[i] = auxiliary_keys[idx];
                 query_ptrs[i] = idx;
             }
         } else {
-            for (int i = 0; i < n_query_keys; ++i) {
-                long j = random_indices[i] * query_step + query_start_idx;
+            for (int i = 0; i < dilax_n_query_keys; ++i) {
+                long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
                 long idx = j / 2;
-                assert(idx < halfN / 2);
+                assert(idx < dilax_halfN / 2);
                 query_keys[i] = allKeys[idx];
                 query_ptrs[i] = allPtrs[idx];
             }
@@ -235,8 +235,8 @@ namespace load_data {
     void insertion_data_load(const string &data_path, const string &random_indices_path,
                              const string &first_half_sorted_indices_path,
                              const string &second_half_random_indices_path) {
-        allKeys = make_unique<keyType []>(totalDataSize + 2);
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
+        allKeys = make_unique<keyType []>(dilax_totalDataSize + 2);
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
 
         data_utils::load_data_to_uptr(random_indices_path.c_str(), data_utils::INT64_FLAG);
         random_indices = std::move(data_utils::array_int64);
@@ -247,31 +247,31 @@ namespace load_data {
         data_utils::load_data_to_uptr(second_half_random_indices_path.c_str(), data_utils::INT64_FLAG);
         second_half_random_indices = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
         auxiliary_keys = std::move(data_utils::array_key);
-        halfN = totalDataSize / 2;
+        dilax_halfN = dilax_totalDataSize / 2;
 
-        keyType upper_bound = auxiliary_keys[totalDataSize - 1] + 1;
-        allKeys[totalDataSize] = upper_bound;
+        keyType upper_bound = auxiliary_keys[dilax_totalDataSize - 1] + 1;
+        allKeys[dilax_totalDataSize] = upper_bound;
 
-        for (long i = 0; i < halfN; ++i) {
+        for (long i = 0; i < dilax_halfN; ++i) {
             long idx = first_half_sorted_indices[i];
             allKeys[i] = auxiliary_keys[idx];
             allPtrs[i] = idx;
         }
-        allKeys[halfN] = upper_bound;
-        allPtrs[halfN] = -1;
-        for (long i = 0; i < halfN; ++i) {
+        allKeys[dilax_halfN] = upper_bound;
+        allPtrs[dilax_halfN] = -1;
+        for (long i = 0; i < dilax_halfN; ++i) {
             long idx = second_half_random_indices[i];
-            allKeys[halfN + 1 + i] = auxiliary_keys[idx];
-            allPtrs[halfN + 1 + i] = idx;
+            allKeys[dilax_halfN + 1 + i] = auxiliary_keys[idx];
+            allPtrs[dilax_halfN + 1 + i] = idx;
         }
 
-        allKeys[totalDataSize + 1] = upper_bound;
-        allPtrs[totalDataSize + 1] = -1;
+        allKeys[dilax_totalDataSize + 1] = upper_bound;
+        allPtrs[dilax_totalDataSize + 1] = -1;
 
-        for (int i = 0; i < n_query_keys; ++i) {
-            long j = random_indices[i] * query_step + query_start_idx;
+        for (int i = 0; i < dilax_n_query_keys; ++i) {
+            long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
             query_keys[i] = allKeys[j];
             query_ptrs[i] = allPtrs[j];
         }
@@ -293,31 +293,31 @@ namespace load_data {
         data_utils::load_data_to_uptr(second_half_random_indices_path.c_str(), data_utils::INT64_FLAG);
         second_half_random_indices = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
         allKeys = std::move(data_utils::array_key);
-        halfN = totalDataSize / 2;
+        dilax_halfN = dilax_totalDataSize / 2;
 
-        keyType upper_bound = allKeys[totalDataSize - 1] + 1;
-        allKeys[totalDataSize] = upper_bound;
+        keyType upper_bound = allKeys[dilax_totalDataSize - 1] + 1;
+        allKeys[dilax_totalDataSize] = upper_bound;
 
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
 
 
-        for (long i = 0; i < totalDataSize; ++i) {
+        for (long i = 0; i < dilax_totalDataSize; ++i) {
             allPtrs[i] = i;
         }
 
-        eraseKeys = make_unique<keyType []>(halfN);
-        erasePtrs = make_unique<recordPtr []>(halfN);
-        for (long i = 0; i < halfN; ++i) {
+        eraseKeys = make_unique<keyType []>(dilax_halfN);
+        erasePtrs = make_unique<recordPtr []>(dilax_halfN);
+        for (long i = 0; i < dilax_halfN; ++i) {
             long idx = second_half_random_indices[i];
             eraseKeys[i] = allKeys[idx];
             erasePtrs[i] = allPtrs[idx];
         }
 
 
-        for (int i = 0; i < n_query_keys; ++i) {
-            long j = random_indices[i] * query_step + query_start_idx;
+        for (int i = 0; i < dilax_n_query_keys; ++i) {
+            long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
             long idx = first_half_sorted_indices[j];
             query_keys[i] = allKeys[idx];
             query_ptrs[i] = allPtrs[idx];
@@ -327,7 +327,7 @@ namespace load_data {
 
     void two_distribution_data_load(const string &data_path, const string &data_2_path, const string &random_indices_path,
                              const string &first_half_sorted_indices_path) {
-//        keys_in_diff_dist = new keyType [halfN+1];
+//        keys_in_diff_dist = new keyType [dilax_halfN+1];
 
 
         data_utils::load_data_to_uptr(random_indices_path.c_str(), data_utils::INT64_FLAG);
@@ -335,26 +335,26 @@ namespace load_data {
         data_utils::load_data_to_uptr(first_half_sorted_indices_path.c_str(), data_utils::INT64_FLAG);
         first_half_sorted_indices = std::move(data_utils::array_int64);
 
-        totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
+        dilax_totalDataSize = data_utils::load_data_to_uptr(data_path.c_str(), data_utils::KEY_FLAG);
         allKeys = std::move(data_utils::array_key);
-        halfN = totalDataSize / 2;
+        dilax_halfN = dilax_totalDataSize / 2;
 
-        keyType upper_bound = allKeys[totalDataSize - 1] + 1;
-        allKeys[totalDataSize] = upper_bound;
+        keyType upper_bound = allKeys[dilax_totalDataSize - 1] + 1;
+        allKeys[dilax_totalDataSize] = upper_bound;
 
-        allPtrs = make_unique<recordPtr []>(totalDataSize + 2);
-        allPtrs[totalDataSize] = -1;
+        allPtrs = make_unique<recordPtr []>(dilax_totalDataSize + 2);
+        allPtrs[dilax_totalDataSize] = -1;
 
         data_utils::load_data_to_uptr(data_2_path.c_str(), data_utils::KEY_FLAG);
         keys_in_diff_dist = std::move(data_utils::array_key);
 
-        ptrs_in_diff_dist = make_unique<recordPtr []>(halfN + 1);
-        for (long i = 0; i < halfN; ++i) {
-            ptrs_in_diff_dist[i] = totalDataSize + i;
+        ptrs_in_diff_dist = make_unique<recordPtr []>(dilax_halfN + 1);
+        for (long i = 0; i < dilax_halfN; ++i) {
+            ptrs_in_diff_dist[i] = dilax_totalDataSize + i;
         }
 
-        for (int i = 0; i < n_query_keys; ++i) {
-            long j = random_indices[i] * query_step + query_start_idx;
+        for (int i = 0; i < dilax_n_query_keys; ++i) {
+            long j = random_indices[i] * dilax_query_step + dilax_query_start_idx;
             long idx = first_half_sorted_indices[j];
             query_keys[i] = allKeys[idx];
             query_ptrs[i] = allPtrs[idx];

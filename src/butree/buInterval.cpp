@@ -3,10 +3,11 @@
 #include <cassert>
 #include <iostream>
 using namespace std;
+using namespace dilax;
 
 
 // use linear loss
-void buInterval::init_merge_info() {
+void dilax::buInterval::init_merge_info() {
     if (fanout == 0) {
         linear_loss = 0;
     } else {
@@ -15,7 +16,7 @@ void buInterval::init_merge_info() {
     }
 }
 
-void buInterval::init_merge_info_w_sampling() {
+void dilax::buInterval::init_merge_info_w_sampling() {
     if (fanout == 0) {
         linear_loss = 0;
     } else {
@@ -25,7 +26,7 @@ void buInterval::init_merge_info_w_sampling() {
 }
 
 
-void buInterval::cal_merge_info(int h) {
+void dilax::buInterval::cal_merge_info(int h) {
     if(lbd >= ubd) {
         cout << "lbd = " << lbd << ", ubd = " << ubd << endl;
     }
@@ -38,7 +39,7 @@ void buInterval::cal_merge_info(int h) {
     merge_lr->merge(lr, rSib->lr, fanout, rSib->fanout, data[start_idx]);
 
     if (h == 0) {
-        if (fanout + rSib->fanout > fanThreashold) {
+        if (fanout + rSib->fanout > dilax_fanThreashold) {
             merge_metric = 1e50;
             return;
         }
@@ -49,7 +50,7 @@ void buInterval::cal_merge_info(int h) {
     merge_metric = delta_linear_loss;
 }
 
-void buInterval::cal_merge_info_w_sampling(int h) {
+void dilax::buInterval::cal_merge_info_w_sampling(int h) {
     if(lbd >= ubd) {
         cout << "lbd = " << lbd << ", ubd = " << ubd << endl;
     }
@@ -62,7 +63,7 @@ void buInterval::cal_merge_info_w_sampling(int h) {
     merge_lr->merge_w_sampling(lr, rSib->lr, fanout, rSib->fanout, data[start_idx]);
 
     if (h == 0) {
-        if (fanout + rSib->fanout > fanThreashold) {
+        if (fanout + rSib->fanout > dilax_fanThreashold) {
             merge_metric = 1e50;
             return;
         }
@@ -74,12 +75,12 @@ void buInterval::cal_merge_info_w_sampling(int h) {
 }
 
 
-bool buInterval::merge_with_rSib(int h, bool if_merge_lr) {
+bool dilax::buInterval::merge_with_rSib(int h, bool if_merge_lr) {
     assert (rSib != NULL);
     ubd = rSib->ubd;
     if (h == 0) {
-        assert(fanout + rSib->fanout <= fanThreashold);
-        if (fanout + rSib->fanout > fanThreashold) {
+        assert(fanout + rSib->fanout <= dilax_fanThreashold);
+        if (fanout + rSib->fanout > dilax_fanThreashold) {
             merge_metric = 2e50;
             return false;
         }
@@ -105,7 +106,7 @@ bool buInterval::merge_with_rSib(int h, bool if_merge_lr) {
     if (rSib) {
         assert(end_idx == rSib->start_idx);
         long dx = data[rSib->start_idx] - data[start_idx];
-        buInterval *l_rSib = static_cast<buInterval*>(rSib);
+        dilax::buInterval *l_rSib = static_cast<dilax::buInterval*>(rSib);
         l_rSib->lr->set_delta_x(dx);
         if (l_rSib->merge_lr) {
             l_rSib->merge_lr->set_delta_x(dx);

@@ -16,21 +16,21 @@
 
 
 const double CACHE_MISS_LOSS = 1;
-long totalDataSize = 200000000l;
-long halfN = totalDataSize / 2;
-const long n_query_keys = 1000000l;
-long query_step = 100;
-long query_start_idx = query_step / 2;
+long dilax_totalDataSize = 200000000l;
+long dilax_halfN = dilax_totalDataSize / 2;
+const long dilax_n_query_keys = 1000000l;
+long dilax_query_step = 100;
+long dilax_query_start_idx = dilax_query_step / 2;
 
-long num_adjust_stats = 0;
-
-
-const double R1 = 25.0 / 130.0;
-const double R2 = 17.0 / 130.0;
-const double R3 = 5.0 / 130.0;
+long dilax_num_adjust_stats = 0;
 
 
-const int fanThreashold = 8192;
+const double dilax_R1 = 25.0 / 130.0;
+const double dilax_R2 = 17.0 / 130.0;
+const double dilax_R3 = 5.0 / 130.0;
+
+
+const int dilax_fanThreashold = 8192;
 //const int minFan = 2;
 //const int LEAF_MAX_CAPACIY = 8192;
 
@@ -43,8 +43,8 @@ const int fanThreashold = 8192;
 //const int minFanforSplit = 16;
 
 
-double RHO = 0.1;
-int buMinFan = 16;
-double max_expanding_ratio = 6;
-double retrain_threshold = 2;
+double dilax_RHO = 0.1;
+int dilax_buMinFan = 16;
+double dilax_max_expanding_ratio = 6;
+double dilax_retrain_threshold = 2;
 

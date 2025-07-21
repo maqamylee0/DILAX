@@ -26,6 +26,7 @@ namespace dilax_auxiliary {
     void free_insert_aux_vars();
 }
 
+namespace dilax {
 
 inline void linearReg_w_simple_strategy(const keyType *X, double &a, double &b, int n) {
     int left_n = n / 2;
@@ -98,6 +99,8 @@ inline void linearReg_w_expanding(const keyType *X, double &a, double &b, int n,
     }
 }
 
+} // namespace dilax
+
 struct dilaxNode{
     int fanout;
     int meta_info;
@@ -138,7 +141,7 @@ struct dilaxNode{
 
 //        fanout += (fanout * n_adjust) / 10;
 //        fanout = std::max<int>(num_nonempty, minFan) * (1 + 0.1 * get_n_adjust());
-        pe_data = new pairEntry[fanout];
+        pe_data = new dilaxPairEntry[fanout];
     }
 
 
@@ -150,7 +153,7 @@ struct dilaxNode{
         num_nonempty = _num_nonempty;
         fanout = std::max<int>(_num_nonempty, minFan);
         fanout <<= 1;
-        pe_data = new pairEntry[fanout];
+        pe_data = new dilaxPairEntry[fanout];
     }
 
     inline void inc_num_nonempty() { ++num_nonempty; }
@@ -160,7 +163,7 @@ struct dilaxNode{
         if (num_nonempty <= 0) {
             assert(num_nonempty == 0);
             for (int i = 0; i < fanout; ++i) {
-                pairEntry &pe = pe_data[i];
+                dilaxPairEntry &pe = pe_data[i];
                 if (pe.key >= 0) {
                     ++num_nonempty;
                 } else if (pe.key == -1) {
@@ -177,7 +180,7 @@ struct dilaxNode{
         last_total_n_travs = total_n_travs;
         last_nn = num_nonempty;
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
                 pe.child->init_after_bulk_load();
             }
@@ -190,7 +193,7 @@ struct dilaxNode{
             assert(num_nonempty < LEAF_MAX_CAPACIY);
         }
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
                 pe.child->check_num_nonempty();
             }
@@ -201,7 +204,7 @@ struct dilaxNode{
     inline recordPtr leaf_find(const keyType &key) const {
         int pred = LR_PRED(a, b, key, fanout);
 //        cout << "pred = " << pred << endl;
-        pairEntry &pe = pe_data[pred];
+        dilaxPairEntry &pe = pe_data[pred];
 //        cout << "pe.key = " << pe.key << endl;
         if (pe.key == key) {
             return pe.ptr;
@@ -225,7 +228,7 @@ struct dilaxNode{
     inline int range_query_from(const keyType &k1, recordPtr *results) const {
         int j = 0;
         int pred = LR_PRED(a, b, k1, fanout);
-        pairEntry &first_pe = pe_data[pred];
+        dilaxPairEntry &first_pe = pe_data[pred];
         if (first_pe.key == -1) {
             j = first_pe.child->range_query_from(k1, results);
         } else if (first_pe.key == -2) {
@@ -243,7 +246,7 @@ struct dilaxNode{
         }
 
         for(int i = pred + 1; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key >= 0) {
                 results[j++] = pe.ptr;
             } else if (pe.key == -1) {
@@ -263,7 +266,7 @@ struct dilaxNode{
         int j = 0;
         int pred = LR_PRED(a, b, k2, fanout);
         for(int i = 0; i < pred; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key >= 0) {
                 results[j++] = pe.ptr;
             } else if (pe.key == -1) {
@@ -276,7 +279,7 @@ struct dilaxNode{
             }
         }
 
-        pairEntry &pe = pe_data[pred];
+        dilaxPairEntry &pe = pe_data[pred];
         if (pe.key == -1) {
             j += pe.child->range_query_to(k2, results+j);
         } else if (pe.key == -2) {
@@ -299,7 +302,7 @@ struct dilaxNode{
     inline void collect_all_ptrs(recordPtr *results) const{
         int j = 0;
         for(int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key >= 0) {
                 results[j++] = pe.ptr;
             } else if (pe.key == -1) {
@@ -319,7 +322,7 @@ struct dilaxNode{
         int pred2 = LR_PRED(a, b, k2, fanout);
 
         if (pred1 == pred2) {
-            pairEntry &pe = pe_data[pred1];
+            dilaxPairEntry &pe = pe_data[pred1];
             if (pe.key == -1) {
                 return pe.child->range_query(k1, k2, results);
             } else if (pe.key == -2) {
@@ -340,7 +343,7 @@ struct dilaxNode{
             }
         } else { // pred1 < pred2
 
-            pairEntry &first_pe = pe_data[pred1];
+            dilaxPairEntry &first_pe = pe_data[pred1];
             int n = 0;
             if (first_pe.key == -1) {
                 n = first_pe.child->range_query_from(k1, results);
@@ -362,7 +365,7 @@ struct dilaxNode{
             }
 
             for (int i = pred1 + 1; i < pred2; ++i) {
-                pairEntry &pe = pe_data[i];
+                dilaxPairEntry &pe = pe_data[i];
                 if (pe.key == -1) {
                     pe.child->collect_all_ptrs(results+n);
                     n += pe.child->num_nonempty;
@@ -375,7 +378,7 @@ struct dilaxNode{
                 }
             }
 
-            pairEntry &final_pe = pe_data[pred2];
+            dilaxPairEntry &final_pe = pe_data[pred2];
             if (final_pe.key == -1) {
                 n += final_pe.child->range_query_to(k2, results+n);
             } else if (final_pe.key == -2) {
@@ -397,7 +400,7 @@ struct dilaxNode{
     }
 
 
-    inline diliNode* find_child(const keyType &key) {
+    inline dilaxNode* find_child(const keyType &key) {
         int i = LR_PRED(a, b, key, fanout);
         return pe_data[i].child;
     }
@@ -464,7 +467,7 @@ struct dilaxNode{
             int cn = 0;
             long c_total_fan = 0;
             long c_n_empty_slots = 0;
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
                 pe.child->num_nonempty_stats(cn0, cn1, cn2, cn, c_total_fan, c_n_empty_slots);
             }
@@ -481,12 +484,12 @@ struct dilaxNode{
     }
 
 
-    ~diliNode(){
+    ~dilaxNode(){
         if (pe_data) {
             if (fanout > 0) {
                 for (int i = 0; i < fanout; ++i) {
                     if (pe_data[i].key == -1) {
-                        diliNode *child = pe_data[i].child;
+                        dilaxNode *child = pe_data[i].child;
                         delete child;
                     }
                 }
@@ -515,7 +518,7 @@ struct dilaxNode{
         fwrite(&n_adjust, sizeof(int), 1, fp);
 
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             keyType key = pe.key;
             fwrite(&(key), sizeof(keyType),1, fp);
             if (key >= 0) {
@@ -550,7 +553,7 @@ struct dilaxNode{
         fread(&last_nn, sizeof(int), 1, fp);
         fread(&n_adjust, sizeof(int), 1, fp);
 
-        pe_data = new pairEntry[fanout];
+        pe_data = new dilaxPairEntry[fanout];
         keyType key = 0;
         recordPtr ptr = 0;
         for (int i = 0; i < fanout; ++i) {
@@ -559,7 +562,7 @@ struct dilaxNode{
                 fread(&ptr, sizeof(recordPtr), 1, fp);
                 pe_data[i].assign(key, ptr);
             } else if (key == -1){
-                diliNode *child = new diliNode(false);
+                dilaxNode *child = new dilaxNode(false);
                 child->load(fp);
                 pe_data[i].setChild(child);
             } else if (key == -2) {
@@ -603,19 +606,19 @@ struct dilaxNode{
             return;
         }
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (!is_internal() && num_nonempty == 0) {
                 cout << "i = " << i << ", fan = " << fanout << ", pe.key = " << pe.key << endl;
             }
             if (pe.key == -1) {
-                diliNode *child = pe.child;
+                dilaxNode *child = pe.child;
                 child->trim();
             }
         }
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
-                diliNode *child = pe.child;
+                dilaxNode *child = pe.child;
                 assert(long(child) != -3l);
                 assert(child->fanout >= 1);
                 if (!(child->is_internal()) && child->num_nonempty == 0) {
@@ -633,11 +636,11 @@ struct dilaxNode{
 
     void simplify() {
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
-                diliNode *child = pe.child;
+                dilaxNode *child = pe.child;
                 if (child->num_nonempty == 2) {
-                    pairEntry &cpe = child->pe_data[0];
+                    dilaxPairEntry &cpe = child->pe_data[0];
                     keyType k1 = cpe.key;
                     recordPtr p1 = cpe.ptr;
                     cpe = child->pe_data[1];
@@ -664,7 +667,7 @@ struct dilaxNode{
 
             assert(fanout > 0);
             if (num_nonempty == 1) {
-//                pe_data = new pairEntry[fanout];
+//                pe_data = new dilaxPairEntry[fanout];
                 a = b = 0;
                 pe_data[0].assign(keys[0], ptrs[0]);
                 total_n_travs = 1;
@@ -688,7 +691,7 @@ struct dilaxNode{
         assert(num_nonempty > 3);
 
         total_n_travs = 0;
-        linearReg_w_expanding(keys, a, b, num_nonempty, fanout, false);
+        dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, false);
 //        linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
         int last_k_id = 0;
         keyType last_key = keys[0];
@@ -698,7 +701,7 @@ struct dilaxNode{
         keyType final_key = keys[num_nonempty - 1];
 //    int final_pos = LR_PRED(a, b, final_key, fanout);
         if (b < 0 || last_pos == LR_PRED(a, b, final_key, fanout)) {
-            linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
+            dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
             last_pos = LR_PRED(a, b, last_key, fanout);
             int final_pos = LR_PRED(a, b, final_key, fanout);
             assert(last_pos != final_pos);
@@ -720,7 +723,7 @@ struct dilaxNode{
                 } else { // need to create a new node
                     int n_keys_this_child = k_id - last_k_id;
                     if (n_keys_this_child == 3) {
-                        diliNode *child = new diliNode(false);
+                        dilaxNode *child = new dilaxNode(false);
                         child->init(3);
                         child->put_three_keys(keys + last_k_id, ptrs + last_k_id);
                         pe_data[last_pos].setChild(child);
@@ -732,7 +735,7 @@ struct dilaxNode{
                         total_n_travs += 4;
                     }
                     else {
-                        diliNode *child = new diliNode(false);
+                        dilaxNode *child = new dilaxNode(false);
                         child->init(n_keys_this_child);
                         child->distribute_data(keys + last_k_id, ptrs + last_k_id);
                         pe_data[last_pos].setChild(child);
@@ -754,7 +757,7 @@ struct dilaxNode{
             int n_keys_this_child = num_nonempty - last_k_id;
             if (n_keys_this_child == 3) {
 
-                diliNode *child = new diliNode(false);
+                dilaxNode *child = new dilaxNode(false);
                 child->init(3);
                 child->put_three_keys(keys + last_k_id, ptrs + last_k_id);
                 pe_data[last_pos].setChild(child);
@@ -767,7 +770,7 @@ struct dilaxNode{
             }
 
             else {
-                diliNode *child = new diliNode(false);
+                dilaxNode *child = new dilaxNode(false);
                 child->init(n_keys_this_child);
                 child->distribute_data(keys + last_k_id, ptrs + last_k_id);
                 pe_data[last_pos].setChild(child);
@@ -788,7 +791,7 @@ struct dilaxNode{
             avg_n_travs_since_last_dist = 1.0 * total_n_travs / num_nonempty;
         }
         for (int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key == -1) {
                 pe.child->cal_avg_n_travs();
             }
@@ -798,7 +801,7 @@ struct dilaxNode{
 
     inline bool insert(const keyType &_key, const recordPtr &_ptr) {
         int pred = LR_PRED(a, b, _key, fanout);
-        pairEntry &pe = pe_data[pred];
+        dilaxPairEntry &pe = pe_data[pred];
 //    if (print) {
 //        cout << "_key = " << _key << ", pe.key = " << pe.key << ", fanout = " << fanout << ", pred = " << pred << ", num_nonempty = " << num_nonempty << endl;
 //    }
@@ -811,7 +814,7 @@ struct dilaxNode{
             }
             return true;
         } else if (pe.key == -1) {
-            diliNode *child = pe.child;
+            dilaxNode *child = pe.child;
             long child_last_total_n_travs = child->total_n_travs;
             bool if_inserted = child->insert(_key, _ptr);
 #ifndef NOT_ADJUST
@@ -820,11 +823,11 @@ struct dilaxNode{
                 ++total_n_travs;
                 total_n_travs += (child->total_n_travs - child_last_total_n_travs);
                 if (if_retrain()) {
-                    collect_and_clear(dili_auxiliary::retrain_keys, dili_auxiliary::retrain_ptrs);
+                    collect_and_clear(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
                     inc_n_adjust();
                     init();
-                    distribute_data(dili_auxiliary::retrain_keys, dili_auxiliary::retrain_ptrs);
-                    ++num_adjust_stats;
+                    distribute_data(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
+                    ++dilax_num_adjust_stats;
                 }
 
                 if (get_n_adjust() >= 4)  {
@@ -845,7 +848,7 @@ struct dilaxNode{
             }
             ++num_nonempty;
 
-            diliNode *child = new diliNode(false);
+            dilaxNode *child = new dilaxNode(false);
             child->init(3);
 
             if (_key > k2) {
@@ -888,7 +891,7 @@ struct dilaxNode{
 
     inline int erase(const keyType &_key) {
         int pred = LR_PRED(a, b, _key, fanout);
-        pairEntry &pe = pe_data[pred];
+        dilaxPairEntry &pe = pe_data[pred];
         if (pe.key == _key) {
             pe.setNull();
             --num_nonempty;
@@ -913,7 +916,7 @@ struct dilaxNode{
                 return -1;
             }
         } else if (pe.key == -1) {
-            diliNode *child = pe.child;
+            dilaxNode *child = pe.child;
             long child_n_travs = child->total_n_travs;
             int flag = child->erase(_key);
 
@@ -935,7 +938,7 @@ struct dilaxNode{
     }
     inline int erase_and_get_ptr(const keyType &_key, recordPtr &ptr) {
         int pred = LR_PRED(a, b, _key, fanout);
-        pairEntry &pe = pe_data[pred];
+        dilaxPairEntry &pe = pe_data[pred];
         if (pe.key == _key) {
             ptr = pe.ptr;
             pe.setNull();
@@ -963,7 +966,7 @@ struct dilaxNode{
                 return -1;
             }
         } else if (pe.key == -1) {
-            diliNode *child = pe.child;
+            dilaxNode *child = pe.child;
             long child_n_travs = child->total_n_travs;
             int flag = child->erase_and_get_ptr(_key, ptr);
 
@@ -988,12 +991,12 @@ struct dilaxNode{
     void collect_and_clear(keyType *keys, recordPtr *ptrs) {
         int j = 0;
         for(int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key >= 0) {
                 keys[j] = pe.key;
                 ptrs[j++] = pe.ptr;
             } else if (pe.key == -1) {
-                diliNode *child = pe.child;
+                dilaxNode *child = pe.child;
                 child->collect_and_clear(keys+j, ptrs+j);
                 j += child->num_nonempty;
                 delete child;
@@ -1015,11 +1018,11 @@ struct dilaxNode{
         assert(b >= 0);
         int j = 0;
         for(int i = 0; i < fanout; ++i) {
-            pairEntry &pe = pe_data[i];
+            dilaxPairEntry &pe = pe_data[i];
             if (pe.key >= 0) {
                 keys[j++] = pe.key;
             } else if (pe.key == -1) {
-                diliNode *child = pe.child;
+                dilaxNode *child = pe.child;
                 child->collect_all_keys(keys+j);
                 j += child->num_nonempty;
             } else if (pe.key == -2) {
@@ -1031,11 +1034,11 @@ struct dilaxNode{
         if (j != num_nonempty) {
             cout << "j = " << j << ", num_nonempty = " << num_nonempty << ", is_internal = " << is_internal() << endl;
             for(int i = 0; i < num_nonempty; ++i) {
-                pairEntry &pe = pe_data[i];
+                dilaxPairEntry &pe = pe_data[i];
                 if (pe.key >= 0) {
                     cout << "i = " << i << ", pe.key = " << pe.key << endl;
                 } else if (pe.key == -1) {
-                    diliNode *child = pe.child;
+                    dilaxNode *child = pe.child;
                     child->collect_all_keys(keys+j);
                     cout << "i = " << i << ", child.num_nonempty = " << child->num_nonempty << endl;
                     j += child->num_nonempty;

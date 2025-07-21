@@ -5,8 +5,10 @@
 #include <set>
 #include <string>
 
-#ifndef DILI_INTERVAL_UTILS_H
-#define DILI_INTERVAL_UTILS_H
+#ifndef DILAX_INTERVAL_UTILS_H
+#define DILAX_INTERVAL_UTILS_H
+
+namespace dilax {
 
 class interval_comparator {
 public:
@@ -50,4 +52,7 @@ bool restore_complete_borders_and_losses(const std::string &mirror_dir, const in
 inline int find_nearest(long N, long n_nodes, long next_n_nodes) {
     return 1.0 * N * next_n_nodes / n_nodes;
 }
-#endif // DILI_INTERVAL_UTILS_H
+
+} // namespace dilax
+
+#endif // DILAX_INTERVAL_UTILS_H

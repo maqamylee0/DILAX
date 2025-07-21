@@ -14,7 +14,7 @@
 #include <vector>
 using namespace std;
 
-
+namespace dilax {
 
 void check_intervals(interval *i_ptr) {
     int count = 1;
@@ -61,10 +61,10 @@ double cal_loss(long N, long n_intervals, double total_linear_loss, bool print=f
     }
 
 
-    double loss = ((2 + R1) * n_stages - 1) + s * (1 + R2) * avg_linear_loss;
+    double loss = ((2 + dilax_R1) * n_stages - 1) + s * (1 + dilax_R2) * avg_linear_loss;
     if (print) {
         cout << "n_stages = " << n_stages << ", linear_loss = " << avg_linear_loss << ", xl_loss = "
-             << (1 + R2) * avg_linear_loss << ", other_loss = " << (2 + R1) * n_stages - 1 << ", s = " << s << endl;
+             << (1 + dilax_R2) * avg_linear_loss << ", other_loss = " << (2 + dilax_R1) * n_stages - 1 << ", s = " << s << endl;
     }
     return loss;
 }
@@ -960,6 +960,7 @@ void get_complete_partition_borders(const keyArray &X, const doubleArray &probs,
             x2 = X[i + fan - 1] + 1;
         }
 
+
         interval *i_ptr = intervalInstance::newInstance(interval_type);
         i_ptr->fanout = fan;
         if (probs) {
@@ -1191,7 +1192,7 @@ void get_complete_partition_borders(const keyArray &X, const doubleArray &probs,
 
 void build_mirror(const keyArray &X, const doubleArray &probs, long N, l_matrix &mirror, const string &mirror_dir, int interval_type) {
     mirror.clear();
-    restore_mirror(mirror_dir, mirror);
+    dilax::restore_mirror(mirror_dir, mirror);
 
     if (mirror.size() > 0 && mirror[mirror.size()-1].size() == 1) {
         return;
@@ -1269,7 +1270,7 @@ void build_mirror(const keyArray &X, const doubleArray &probs, long N, l_matrix 
 
 void build_mirror_from_given_layout(const keyArray &X, const doubleArray &probs, long N, l_matrix &mirror, const string &mirror_dir, const longVec &layout, int interval_type) {
     mirror.clear();
-    restore_mirror(mirror_dir, mirror);
+    dilax::restore_mirror(mirror_dir, mirror);
 
     if (mirror.size() > 0 && mirror[mirror.size()-1].size() == 1) {
         return;
@@ -1279,10 +1280,10 @@ void build_mirror_from_given_layout(const keyArray &X, const doubleArray &probs,
     if (mirror.size() <= 0) {
         longVec h0_borders;
         doubleVec h0_rmses;
-        bool restore_status = restore_complete_borders(mirror_dir, 0, h0_borders);
+        bool restore_status = dilax::restore_complete_borders(mirror_dir, 0, h0_borders);
         if (!restore_status) {
-//            get_complete_partition_borders(X, probs, N, 0, 32, fanThreashold/2, h0_borders, h0_rmses, interval_type);
-            get_complete_partition_borders(X, probs, N, 0, buMinFan, fanThreashold/2, h0_borders, h0_rmses, interval_type);
+//            get_complete_partition_borders(X, probs, N, 0, 32, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
+            get_complete_partition_borders(X, probs, N, 0, dilax_buMinFan, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
             string h0_borders_path = mirror_dir + "/h0_borders";
             data_utils::save_vec_data(h0_borders_path.c_str(), h0_borders);
 
@@ -1316,10 +1317,10 @@ void build_mirror_from_given_layout(const keyArray &X, const doubleArray &probs,
 
         longVec hi_borders;
         doubleVec hi_rmses;
-        bool restore_status = restore_complete_borders(mirror_dir, i, hi_borders);
+        bool restore_status = dilax::restore_complete_borders(mirror_dir, i, hi_borders);
         if (!restore_status) {
-            get_complete_partition_borders(topX, NULL, curr_n_nodes, i, 100, fanThreashold, hi_borders, hi_rmses, interval_type);
-//            get_complete_partition_borders(topX, NULL, curr_n_nodes, i, buMinFan * 2, fanThreashold, hi_borders, hi_rmses, interval_type);
+            get_complete_partition_borders(topX, NULL, curr_n_nodes, i, 100, dilax_fanThreashold, hi_borders, hi_rmses, interval_type);
+//            get_complete_partition_borders(topX, NULL, curr_n_nodes, i, dilax_buMinFan * 2, dilax_fanThreashold, hi_borders, hi_rmses, interval_type);
         }
         long hi_min_size = hi_borders.back();
         hi_borders.pop_back();
@@ -1383,10 +1384,10 @@ double loss_est_complex(int h, long n_nodes, long next_n_nodes, long N_at_h0, do
     double loss_curr_h = loss_curr_h_bin;
     double loss_next = loss_nex_bin;
 
-    double avg_linear_loss = (1 + R2) * rh * (loss_curr_h + loss_next);
+    double avg_linear_loss = (1 + dilax_R2) * rh * (loss_curr_h + loss_next);
 //    double avg_linear_loss = rh * (rmse_current_height + s * next_level_rmse);
 //    avg_linear_loss = ((avg_linear_loss > 1) ? (2 * log(avg_linear_loss) / log(2.0)) : 0);
-    double find_leaf_loss = ((2 + R1) * (_n_stages + 1));
+    double find_leaf_loss = ((2 + dilax_R1) * (_n_stages + 1));
     double loss = find_leaf_loss + avg_linear_loss;
 
     if (print) {// || (h == 0 && n_nodes == 6060606)) {
@@ -1457,10 +1458,10 @@ double loss_est(int h, long n_nodes, long last_n_nodes, double _rho, double rmse
     double loss_curr_h = loss_curr_h_bin;
     double loss_next = loss_nex_bin;
 
-    double avg_linear_loss = (1 + R2) * rh * (loss_curr_h + loss_next);
+    double avg_linear_loss = (1 + dilax_R2) * rh * (loss_curr_h + loss_next);
 //    double avg_linear_loss = rh * (rmse_current_height + s * next_level_rmse);
 //    avg_linear_loss = ((avg_linear_loss > 1) ? (2 * log(avg_linear_loss) / log(2.0)) : 0);
-    double find_leaf_loss = ((2 + R1) * (_n_stages + 1));
+    double find_leaf_loss = ((2 + dilax_R1) * (_n_stages + 1));
     double loss = find_leaf_loss + avg_linear_loss;
 
     if (print) {// || (h == 0 && n_nodes == 6060606)) {
@@ -1705,7 +1706,7 @@ void build_ideal_mirror(const keyArray &X, const doubleArray &probs, long N, l_m
     else if (dir_status == 0) {
         file_utils::detect_and_create_dir(mirror_dir);
     } else {
-        restore_mirror(mirror_dir, mirror, true);
+        dilax::restore_mirror(mirror_dir, mirror, true);
     }
 
     if (mirror.size() > 0 && mirror[mirror.size()-1].size() == 1) {
@@ -1719,13 +1720,13 @@ void build_ideal_mirror(const keyArray &X, const doubleArray &probs, long N, l_m
     if (mirror.size() <= 0) {
         bool restore_status = restore_complete_borders_and_losses(mirror_dir, 0, h0_borders, h0_rmses);
         if (!restore_status) {
-//            get_complete_partition_borders(X, probs, N, 0, 32, fanThreashold/2, h0_borders, h0_rmses, interval_type);
+//            get_complete_partition_borders(X, probs, N, 0, 32, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
             cout << "Building BU-Tree...... This step may take several minutes but will be executed once only." << endl;
 
             auto start = chrono::system_clock::now();
-            get_complete_partition_borders(X, probs, N, 0, buMinFan, fanThreashold/2, h0_borders, h0_rmses, interval_type);
-//            get_complete_partition_borders_for_lowest_layer(X, N, 0, buMinFan, fanThreashold/2, h0_borders, h0_rmses, interval_type);
-//            get_complete_partition_borders_w_sampling(X, N, 0, buMinFan, fanThreashold/2, h0_borders, h0_rmses, interval_type);
+            get_complete_partition_borders(X, probs, N, 0, dilax_buMinFan, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
+//            get_complete_partition_borders_for_lowest_layer(X, N, 0, dilax_buMinFan, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
+//            get_complete_partition_borders_w_sampling(X, N, 0, dilax_buMinFan, dilax_fanThreashold/2, h0_borders, h0_rmses, interval_type);
             auto stop = chrono::system_clock::now();
             auto duration = chrono::duration_cast<chrono::seconds>(stop - start);
             double response_time = static_cast<double>(duration.count());
@@ -1751,7 +1752,7 @@ void build_ideal_mirror(const keyArray &X, const doubleArray &probs, long N, l_m
 
         long est_next_n_nodes = 0;
         double h0_loss = 0;
-        long est_n_nodes = estimate_ideal_layout(0, N, h0_rmses, N, h0_rmses, buMinFan, 200, 100, 10000, RHO, est_next_n_nodes, h0_loss);
+        long est_n_nodes = estimate_ideal_layout(0, N, h0_rmses, N, h0_rmses, dilax_buMinFan, 200, 100, 10000, dilax_RHO, est_next_n_nodes, h0_loss);
 
         mirror.push_back(longVec());
         assert(h0_min_size < est_n_nodes);
@@ -1787,15 +1788,15 @@ void build_ideal_mirror(const keyArray &X, const doubleArray &probs, long N, l_m
         double root_lin_loss = root_rmse / 4;
         double root_bin_loss = (root_rmse > 2) ? 2 * log(root_rmse) / log(2.0) : 2;
         double root_loss = std::min<double>(root_lin_loss, root_bin_loss);
-        root_loss *= (1 + R2) * pow(RHO, curr_h);
+        root_loss *= (1 + dilax_R2) * pow(dilax_RHO, curr_h);
 //        cout << "curr_h = " << curr_h << ", root_loss = " << root_loss << endl;
 
         longVec hi_borders;
         doubleVec hi_rmses;
-        bool restore_status = restore_complete_borders(mirror_dir, curr_h, hi_borders);
+        bool restore_status = dilax::restore_complete_borders(mirror_dir, curr_h, hi_borders);
         if (!restore_status) {
-            get_complete_partition_borders(topX, nullptr, curr_n_nodes, curr_h, 100, fanThreashold/2, hi_borders, hi_rmses, interval_type);
-//            get_complete_partition_borders(topX, NULL, curr_n_nodes, curr_h, buMinFan * 2, fanThreashold/2, hi_borders, hi_rmses, interval_type);
+            get_complete_partition_borders(topX, nullptr, curr_n_nodes, curr_h, 100, dilax_fanThreashold/2, hi_borders, hi_rmses, interval_type);
+//            get_complete_partition_borders(topX, NULL, curr_n_nodes, curr_h, dilax_buMinFan * 2, dilax_fanThreashold/2, hi_borders, hi_rmses, interval_type);
         }
 
         long hi_min_size = hi_borders.back();
@@ -1804,8 +1805,8 @@ void build_ideal_mirror(const keyArray &X, const doubleArray &probs, long N, l_m
 
         long est_next_n_nodes = 0;
         double hi_loss = 0;
-        long est_n_nodes = estimate_ideal_layout(curr_h, curr_n_nodes, hi_rmses, N, h0_rmses, 100, 10000, 100, 10000, RHO, est_next_n_nodes, hi_loss);
-//        long est_n_nodes = estimate_ideal_layout(curr_h, curr_n_nodes, hi_rmses, N, h0_rmses, buMinFan, 10000, 100, 10000, RHO, est_next_n_nodes, hi_loss);
+        long est_n_nodes = estimate_ideal_layout(curr_h, curr_n_nodes, hi_rmses, N, h0_rmses, 100, 10000, 100, 10000, dilax_RHO, est_next_n_nodes, hi_loss);
+//        long est_n_nodes = estimate_ideal_layout(curr_h, curr_n_nodes, hi_rmses, N, h0_rmses, dilax_buMinFan, 10000, 100, 10000, dilax_RHO, est_next_n_nodes, hi_loss);
 
 
         if (curr_h > 1 && root_loss < hi_loss) {
@@ -1862,7 +1863,7 @@ bool restore_complete_borders(const string &mirror_dir, const int h, longVec &bo
 }
 
 bool restore_complete_borders_and_losses(const string &mirror_dir, const int h, longVec &borders, doubleVec &losses) {
-    bool status = restore_complete_borders(mirror_dir, h, borders);
+    bool status = dilax::restore_complete_borders(mirror_dir, h, borders);
     if(!status) {
         return false;
     }
@@ -1875,3 +1876,5 @@ bool restore_complete_borders_and_losses(const string &mirror_dir, const int h, 
     }
     return false;
 }
+
+} // namespace dilax

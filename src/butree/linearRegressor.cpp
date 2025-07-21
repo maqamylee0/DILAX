@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cstdio>
 using namespace std;
+using namespace dilax;
 
 
 const int sampling_factor = 2;

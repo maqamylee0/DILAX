@@ -1,11 +1,11 @@
-#include "diliNode.h"
+#include "dilaxNode.h"
 #include <iostream>
 using namespace std;
 
-namespace dili_auxiliary {
+namespace dilax_auxiliary {
     std::vector<fan2Leaf*> empty_fan2leaves;
-    std::vector<diliNode*> empty_fan2nodes;
-    std::vector<diliNode*> empty_nodes;
+    std::vector<dilaxNode*> empty_fan2nodes;
+    std::vector<dilaxNode*> empty_nodes;
     keyType *retrain_keys = NULL;
     recordPtr *retrain_ptrs = NULL;
 

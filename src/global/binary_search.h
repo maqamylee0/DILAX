@@ -1,10 +1,10 @@
-#ifndef DILI_BINARY_SEARCH_H
-#define DILI_BINARY_SEARCH_H
+#ifndef DILAX_BINARY_SEARCH_H
+#define DILAX_BINARY_SEARCH_H
 
 
 // return i with data[i] <= x < data[i + 1]
 template <class T, class K>
-inline int binary_search_type_1(T *data, const K &x, int l, int r)  {
+inline int dilax_binary_search_type_1(T *data, const K &x, int l, int r)  {
     while (l < r) {
         int mid = (l + r) >> 1;
         if (data[mid] <= x) {
@@ -17,4 +17,4 @@ inline int binary_search_type_1(T *data, const K &x, int l, int r)  {
     return l - 1;
 }
 
-#endif //DILI_BINARY_SEARCH_H
+#endif //DILAX_BINARY_SEARCH_H
