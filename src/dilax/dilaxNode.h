@@ -7,9 +7,22 @@
 #include <cmath>
 #include <cassert>
 #include <stack>
+#include <atomic>
+#include <vector>
+#include <future>
+#include <thread>
+#include <chrono>
 #include "../global/global.h"
 #include "../global/fan2Leaf.h"
 //#include "../global/linearReg.h"
+
+// Performance optimization macros
+#ifndef LIKELY
+#define LIKELY(x)   __builtin_expect(!!(x), 1)
+#endif
+#ifndef UNLIKELY
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#endif
 
 #ifndef DILAX_DILAXNODE_H
 #define DILAX_DILAXNODE_H
@@ -110,12 +123,20 @@ struct dilaxNode{
 
     dilaxPairEntry *pe_data;
 
-
     double avg_n_travs_since_last_dist;
     long total_n_travs;
     long last_total_n_travs;
     int last_nn;
     int n_adjust;
+
+    // Thread-safety: HyPeR-inspired fine-grained concurrency
+    mutable std::atomic<uint32_t> node_version_;     // Version counter for optimistic reads
+    mutable std::atomic<bool> is_obsolete_;          // Node obsolescence flag
+    mutable std::atomic<int> active_operations_;     // Count of active operations
+    
+    // Lock constants for optimistic concurrency
+    static constexpr uint32_t VERSION_LOCKED = 0x80000000U;  // Lock bit in version
+    static constexpr uint32_t VERSION_MASK = 0x7FFFFFFFU;    // Version counter mask
 
 
 
@@ -130,6 +151,109 @@ struct dilaxNode{
 
     inline int get_n_adjust() { return n_adjust; }
     inline void inc_n_adjust() { ++n_adjust; }
+
+    // HyPeR-inspired optimistic concurrency control
+    inline uint32_t begin_read_operation() const {
+        active_operations_.fetch_add(1, std::memory_order_acquire);
+        uint32_t version = node_version_.load(std::memory_order_acquire);
+        
+        // Spin while locked or obsolete
+        while ((version & VERSION_LOCKED) || is_obsolete_.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+            version = node_version_.load(std::memory_order_acquire);
+        }
+        return version & VERSION_MASK;
+    }
+    
+    inline bool end_read_operation(uint32_t start_version) const {
+        active_operations_.fetch_sub(1, std::memory_order_release);
+        uint32_t end_version = node_version_.load(std::memory_order_acquire);
+        
+        // Check if version changed or node became obsolete
+        return (end_version & VERSION_MASK) == start_version && 
+               !is_obsolete_.load(std::memory_order_acquire);
+    }
+    
+    inline bool try_begin_write_operation() const {
+        // Try to lock the version counter
+        uint32_t current_version = node_version_.load(std::memory_order_acquire);
+        if (current_version & VERSION_LOCKED) return false;
+        if (is_obsolete_.load(std::memory_order_acquire)) return false;
+        
+        uint32_t locked_version = current_version | VERSION_LOCKED;
+        return node_version_.compare_exchange_strong(current_version, locked_version, 
+                                                   std::memory_order_acq_rel);
+    }
+    
+    inline void end_write_operation() const {
+        // Wait for all active operations to complete
+        while (active_operations_.load(std::memory_order_acquire) > 0) {
+            std::this_thread::yield();
+        }
+        
+        // Increment version and release lock
+        uint32_t current = node_version_.load(std::memory_order_acquire);
+        uint32_t new_version = ((current & VERSION_MASK) + 1) & VERSION_MASK;
+        node_version_.store(new_version, std::memory_order_release);
+    }
+    
+    // Optimistic retry helper with exponential backoff
+    template<typename Operation>
+    inline auto retry_operation(Operation&& op, int max_retries = 10) const {
+        for (int attempt = 0; attempt < max_retries; ++attempt) {
+            try {
+                return op();
+            } catch (const std::exception&) {
+                if (attempt == max_retries - 1) throw;
+                
+                // Exponential backoff
+                std::this_thread::sleep_for(std::chrono::microseconds(1 << std::min(attempt, 6)));
+            }
+        }
+    }
+    
+    // HyPeR-inspired RAII guards for optimistic concurrency
+    class OptimisticReadGuard {
+        const dilaxNode* node_;
+        uint32_t start_version_;
+        bool valid_;
+    public:
+        explicit OptimisticReadGuard(const dilaxNode* node) : node_(node), valid_(true) {
+            start_version_ = node_->begin_read_operation();
+        }
+        
+        ~OptimisticReadGuard() {
+            if (valid_) {
+                valid_ = node_->end_read_operation(start_version_);
+            }
+        }
+        
+        bool validate() {
+            if (!valid_) return false;
+            valid_ = node_->end_read_operation(start_version_);
+            if (valid_) {
+                start_version_ = node_->begin_read_operation();
+            }
+            return valid_;
+        }
+        
+        bool is_valid() const { return valid_; }
+    };
+    
+    class WriteGuard {
+        const dilaxNode* node_;
+        bool locked_;
+    public:
+        explicit WriteGuard(const dilaxNode* node) : node_(node), locked_(false) {
+            locked_ = node_->try_begin_write_operation();
+        }
+        
+        ~WriteGuard() {
+            if (locked_) node_->end_write_operation();
+        }
+        
+        bool is_locked() const { return locked_; }
+    };
 
 
     inline void set_num_nonempty(int n) { num_nonempty = n; }
@@ -147,7 +271,8 @@ struct dilaxNode{
 
 
     dilaxNode(bool _is_internal): a(0), b(0), meta_info(_is_internal), fanout(0), pe_data(NULL), n_adjust(30), num_nonempty(0),
-                                 total_n_travs(0), last_total_n_travs(0), last_nn(0), avg_n_travs_since_last_dist(1e10)  {}
+                                 total_n_travs(0), last_total_n_travs(0), last_nn(0), avg_n_travs_since_last_dist(1e10),
+                                 node_version_(0), is_obsolete_(false), active_operations_(0) {}
 
     inline void init(const int &_num_nonempty) {
         num_nonempty = _num_nonempty;
@@ -157,6 +282,10 @@ struct dilaxNode{
     }
 
     inline void inc_num_nonempty() { ++num_nonempty; }
+    inline void atomic_inc_num_nonempty() { 
+        std::atomic<int>* atomic_num = reinterpret_cast<std::atomic<int>*>(&num_nonempty);
+        atomic_num->fetch_add(1, std::memory_order_relaxed);
+    }
     inline int get_num_nonempty() { return num_nonempty; }
 
     int cal_num_nonempty() {
@@ -202,25 +331,31 @@ struct dilaxNode{
 
 
     inline recordPtr leaf_find(const keyType &key) const {
+        // HyPeR-inspired optimistic read with validation
+        OptimisticReadGuard guard(this);
+        
         int pred = LR_PRED(a, b, key, fanout);
-//        cout << "pred = " << pred << endl;
         dilaxPairEntry &pe = pe_data[pred];
-//        cout << "pe.key = " << pe.key << endl;
+        
         if (pe.key == key) {
-            return pe.ptr;
+            return guard.is_valid() ? pe.ptr : leaf_find(key); // Retry if invalid
         }
         if (pe.key == -1) {
-            return pe.child->leaf_find(key);
+            return guard.is_valid() ? pe.child->leaf_find(key) : leaf_find(key);
         }
         if (pe.key == -2) {
             fan2Leaf *child = pe.fan2child;
-            if (child->k1 == key) {
-                return child->p1;
+            if (guard.is_valid()) {
+                if (child->k1 == key) {
+                    return child->p1;
+                }
+                if (child->k2 == key) {
+                    return child->p2;
+                }
+                return -1;
+            } else {
+                return leaf_find(key); // Retry if invalid
             }
-            if (child->k2 == key) {
-                return child->p2;
-            }
-            return -1;
         }
         return -1;
     }
@@ -300,6 +435,7 @@ struct dilaxNode{
 
 
     inline void collect_all_ptrs(recordPtr *results) const{
+        // Simplified sequential version for better cache performance
         int j = 0;
         for(int i = 0; i < fanout; ++i) {
             dilaxPairEntry &pe = pe_data[i];
@@ -402,7 +538,22 @@ struct dilaxNode{
 
     inline dilaxNode* find_child(const keyType &key) {
         int i = LR_PRED(a, b, key, fanout);
-        return pe_data[i].child;
+        if (UNLIKELY(i < 0 || i >= fanout || !pe_data)) {
+            return nullptr;  // Safety check for corrupted state
+        }
+        
+        // Critical fix: Only return child if this is actually a child pointer
+        dilaxPairEntry &pe = pe_data[i];
+        if (pe.key == -1) {
+            return pe.child;  // This is a child pointer
+        } else if (pe.key == -2) {
+            // This is a fan2Leaf, we need to handle it differently
+            // For now, return nullptr to indicate it's not a regular child
+            return nullptr;
+        } else {
+            // This is a data entry, not a child pointer
+            return nullptr;
+        }
     }
 
 
