@@ -50,9 +50,8 @@ class DILAX {
     dilaxNode *root;
     string mirror_dir;
     
-    // RCU-style optimistic concurrency control
-    mutable std::shared_mutex tree_mutex;       // Only for tree structure changes
-    mutable std::atomic<uint64_t> global_epoch{0}; // Global version counter  
+    // Minimal synchronization: only tree-level mutex and build flag
+    mutable std::shared_mutex tree_mutex;       // For tree structure protection
     std::atomic<bool> is_built{false};          // Atomic flag to check if tree is built
 
 public:
@@ -279,26 +278,27 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Minimal critical section - only protect tree structure changes
+        // Fine-grained approach: optimistic insert with minimal locking
+        dilaxNode* target_node;
+        
+        // First, find the leaf with only a read lock to avoid blocking readers
         {
-            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
-            
-            // Increment epoch to invalidate concurrent reads
-            global_epoch.fetch_add(1, std::memory_order_release);
-            
-            // Find target node under exclusive lock
-            dilaxNode* target_node = find_leaf(key);
-            if (target_node) {
-                bool result = target_node->insert(key, ptr);
-                
-                // Increment epoch again after modification
-                global_epoch.fetch_add(1, std::memory_order_release);
-                return result;
+            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+            target_node = find_leaf(key);
+        }
+        
+        if (target_node) {
+            // Try optimistic insert on the node without tree-level lock
+            if (target_node->insert(key, ptr)) {
+                return true;
             }
             
-            global_epoch.fetch_add(1, std::memory_order_release);
-            return false;
+            // Only if optimistic fails, use minimal exclusive lock
+            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+            return target_node->insert(key, ptr);
         }
+        
+        return false;
     };
     
     inline bool insert(const pair<keyType, recordPtr> &p) { 
@@ -309,25 +309,28 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Minimal critical section with epoch tracking
+        // Fine-grained approach: optimistic erase with minimal locking
+        dilaxNode* target_node;
+        
+        // First, find the leaf with only a read lock
         {
-            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
-            
-            // Increment epoch to invalidate concurrent reads
-            global_epoch.fetch_add(1, std::memory_order_release);
-            
-            dilaxNode* target_node = find_leaf(key);
-            if (target_node) {
-                int result = target_node->erase(key);
-                
-                // Increment epoch again after modification
-                global_epoch.fetch_add(1, std::memory_order_release);
-                return result >= 0;
+            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+            target_node = find_leaf(key);
+        }
+        
+        if (target_node) {
+            // Try optimistic erase first
+            int result = target_node->erase(key);
+            if (result >= 0) {
+                return true;
             }
             
-            global_epoch.fetch_add(1, std::memory_order_release);
-            return false;
+            // Only if optimistic fails, use minimal exclusive lock
+            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+            return target_node->erase(key) >= 0;
         }
+        
+        return false;
     };
     
     inline recordPtr delete_key(const keyType &key) {
@@ -369,76 +372,53 @@ public:
 
 
 
-    inline long search(const keyType &key) const{
-        // RCU-style optimistic read with epoch validation
+    inline long search(const keyType &key) const {
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
-        // Retry loop for optimistic reads
-        for (int attempt = 0; attempt < 10; ++attempt) {
-            // Capture epoch at start of read
-            uint64_t start_epoch = global_epoch.load(std::memory_order_acquire);
-            
-            // Completely lock-free read path with validation
-            dilaxNode *node = root;
-            while (node) {
-                // Quick validation - if epoch changed, restart
-                if (UNLIKELY(global_epoch.load(std::memory_order_relaxed) != start_epoch)) {
-                    break; // Restart read
-                }
-                
-                if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                    return -1;  // Corrupted node
-                }
-                
-                int pred = LR_PRED(node->a, node->b, key, node->fanout);
-                
-                if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                    return -1;  // Invalid prediction
-                }
-                
-                // Read entry atomically with memory barrier
-                dilaxPairEntry kp;
-                std::atomic_thread_fence(std::memory_order_acquire);
-                std::memcpy(&kp, &node->pe_data[pred], sizeof(dilaxPairEntry));
-                std::atomic_thread_fence(std::memory_order_acquire);
-                
-                // Final epoch validation before using result
-                if (UNLIKELY(global_epoch.load(std::memory_order_acquire) != start_epoch)) {
-                    break; // Restart read
-                }
-                
-                if (kp.key == key) {
-                    return kp.ptr;
-                } else if (kp.key == -1) {
-                    node = kp.child;
-                } else if (kp.key == -2) {
-                    fan2Leaf *child = kp.fan2child;
-                    if (UNLIKELY(!child)) {
-                        return -1;
-                    }
-                    if (child->k1 == key) {
-                        return child->p1;
-                    }
-                    if (child->k2 == key) {
-                        return child->p2;
-                    }
-                    return -1;
-                } else {
-                    return -1;
-                }
+        // Simple, fast lock-free read - single attempt
+        dilaxNode *node = root;
+        while (node) {
+            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
+                break;  // Fall back to locked read
             }
             
-            // Exponential backoff for retry
-            if (attempt < 9) {
-                std::this_thread::sleep_for(std::chrono::nanoseconds(1 << attempt));
+            int pred = LR_PRED(node->a, node->b, key, node->fanout);
+            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
+                break;  // Fall back to locked read
+            }
+            
+            // Read entry with memory barrier for consistency
+            dilaxPairEntry kp;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            std::memcpy(&kp, &node->pe_data[pred], sizeof(dilaxPairEntry));
+            std::atomic_thread_fence(std::memory_order_acquire);
+            
+            if (kp.key == key) {
+                return kp.ptr;
+            } else if (kp.key == -1) {
+                node = kp.child;
+            } else if (kp.key == -2) {
+                fan2Leaf *child = kp.fan2child;
+                if (UNLIKELY(!child)) {
+                    break;  // Fall back to locked read
+                }
+                if (child->k1 == key) {
+                    return child->p1;
+                }
+                if (child->k2 == key) {
+                    return child->p2;
+                }
+                return -1;
+            } else {
+                return -1;
             }
         }
         
-        // Fallback to locked read after retries
+        // Fallback to shared lock only if lock-free read fails
         std::shared_lock<std::shared_mutex> lock(tree_mutex);
-        dilaxNode *node = root;
+        node = root;
         while (node) {
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
                 return -1;
@@ -468,27 +448,11 @@ public:
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        // RCU-style optimistic range query
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return 0;  // Tree not built yet
         }
         
-        // Try optimistic read first
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            uint64_t start_epoch = global_epoch.load(std::memory_order_acquire);
-            
-            int result = root->range_query(k1, k2, ptrs);
-            
-            // Validate epoch after range query
-            if (LIKELY(global_epoch.load(std::memory_order_acquire) == start_epoch)) {
-                return result;
-            }
-            
-            // Brief pause before retry
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100 << attempt));
-        }
-        
-        // Fallback to locked range query
+        // Use shared lock for range queries to ensure consistency
         std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         return root->range_query(k1, k2, ptrs);
     }
