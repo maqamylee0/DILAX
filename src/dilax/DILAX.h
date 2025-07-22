@@ -17,12 +17,12 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
 #include <stack>
+#include <shared_mutex>
 #include <mutex>
 #include <thread>
 #include <atomic>
 #include <future>
 #include <algorithm>
-#include <execution>
 
 // Branch prediction hints for better performance
 #ifndef LIKELY
@@ -47,8 +47,8 @@ class DILAX {
     dilaxNode *root;
     string mirror_dir;
     
-    // HyPeR-inspired optimistic concurrency
-    mutable std::mutex write_mutex;        // Fallback mutex for complex operations
+    // Use simple exclusive mutex for complete consistency
+    mutable std::mutex tree_mutex;         // Exclusive lock for all operations
     std::atomic<bool> is_built{false};     // Atomic flag to check if tree is built
 
 public:
@@ -78,8 +78,8 @@ public:
     }
 
     void clear() {
-        // Use mutex for clearing operation
-        std::lock_guard<std::mutex> lock(write_mutex);
+        // Use exclusive lock for clearing operation
+        std::lock_guard<std::mutex> lock(tree_mutex);
         
         is_built.store(false);
         
@@ -102,8 +102,8 @@ public:
     void set_mirror_dir(const std::string &dir) { mirror_dir = dir; }
 
     void build_from_mirror(l_matrix &mirror, const keyArray &all_keys, const recordPtrArray &all_ptrs, long N) {
-        // Use mutex during tree construction
-        std::lock_guard<std::mutex> lock(write_mutex);
+        // Use exclusive lock during tree construction
+        std::lock_guard<std::mutex> lock(tree_mutex);
         
         // Mark as not built during construction
         is_built.store(false);
@@ -271,99 +271,55 @@ public:
     }
 
     inline bool insert(const keyType &key, const recordPtr &ptr) { 
-        // HyPeR-inspired optimistic concurrency for better multi-threaded performance
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return false;  // Tree not built yet
         }
         
-        // Optimistic retry approach instead of single mutex
-        const int max_retries = 10;
-        for (int attempt = 0; attempt < max_retries; ++attempt) {
-            try {
-                // Find target node using lock-free traversal
-                dilaxNode* target_node = find_leaf(key);
-                if (UNLIKELY(!target_node)) {
-                    return false;  // Tree traversal failed
-                }
-                
-                // Try optimistic write on the target node
-                dilaxNode::WriteGuard guard(target_node);
-                if (guard.is_locked()) {
-                    bool result = target_node->insert(key, ptr);
-                    return result;
-                }
-                
-                // If we can't get the write lock, retry with exponential backoff
-                if (attempt < max_retries - 1) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1 << std::min(attempt, 6)));
-                }
-            } catch (...) {
-                // Handle any exceptions during optimistic execution
-                if (attempt == max_retries - 1) {
-                    // Fall back to global mutex as last resort
-                    std::lock_guard<std::mutex> lock(write_mutex);
-                    return root->insert(key, ptr);
-                }
-            }
-        }
+        // Use exclusive lock for all operations to ensure complete consistency
+        std::lock_guard<std::mutex> lock(tree_mutex);
         
-        // Final fallback
-        std::lock_guard<std::mutex> lock(write_mutex);
-        return root->insert(key, ptr);
+        // Find target node under exclusive lock
+        dilaxNode* target_node = find_leaf(key);
+        if (target_node) {
+            return target_node->insert(key, ptr);
+        }
+        return false;
     };
     
     inline bool insert(const pair<keyType, recordPtr> &p) { 
         return insert(p.first, p.second); 
     };
     inline bool erase(const keyType &key) { 
-        // HyPeR-inspired optimistic concurrency for better multi-threaded performance
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return false;  // Tree not built yet
         }
         
-        // Optimistic retry approach instead of single mutex
-        const int max_retries = 10;
-        for (int attempt = 0; attempt < max_retries; ++attempt) {
-            try {
-                // Find target node using lock-free traversal
-                dilaxNode* target_node = find_leaf(key);
-                
-                // Try optimistic write on the target node
-                dilaxNode::WriteGuard guard(target_node);
-                if (guard.is_locked()) {
-                    int result = target_node->erase(key);
-                    return result >= 0;
-                }
-                
-                // If we can't get the write lock, retry with exponential backoff
-                if (attempt < max_retries - 1) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(1 << std::min(attempt, 6)));
-                }
-            } catch (...) {
-                // Handle any exceptions during optimistic execution
-                if (attempt == max_retries - 1) {
-                    // Fall back to global mutex as last resort
-                    std::lock_guard<std::mutex> lock(write_mutex);
-                    return 0 <= (root->erase(key));
-                }
-            }
-        }
+        // Use exclusive lock for all operations to ensure complete consistency
+        std::lock_guard<std::mutex> lock(tree_mutex);
         
-        // Final fallback
-        std::lock_guard<std::mutex> lock(write_mutex);
-        return 0 <= (root->erase(key));
-    }
+        // Find target node under exclusive lock
+        dilaxNode* target_node = find_leaf(key);
+        if (target_node) {
+            int result = target_node->erase(key);
+            return result >= 0;
+        }
+        return false;
+    };
     
     inline recordPtr delete_key(const keyType &key) {
-        // Use fallback mutex for delete operations
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
-        // Use write mutex for delete operations
-        std::lock_guard<std::mutex> lock(write_mutex);
+        // Use exclusive lock for all operations to ensure complete consistency
+        std::lock_guard<std::mutex> lock(tree_mutex);
+        
+        // Find target node under exclusive lock
+        dilaxNode* target_node = find_leaf(key);
         recordPtr ptr = static_cast<recordPtr>(-1);
-        root->erase_and_get_ptr(key, ptr);
+        if (target_node) {
+            target_node->erase_and_get_ptr(key, ptr);
+        }
         return ptr;
     }
 
@@ -390,47 +346,35 @@ public:
 
 
     inline long search(const keyType &key) const{
-        // Completely lock-free search - no versioning, no guards, just raw performance
+        // Use exclusive lock for reads to ensure complete consistency
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
+        // Exclusive lock ensures no race conditions with writers
+        std::lock_guard<std::mutex> lock(tree_mutex);
+        
         dilaxNode *node = root;
         while (node) {
-            // Minimal safety checks for crash prevention
+            // Safe to read with exclusive lock protecting us
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
                 return -1;  // Corrupted node
             }
             
-            // Use atomic loads for critical data to ensure consistency
-            int fanout = std::atomic_load_explicit(
-                reinterpret_cast<const std::atomic<int>*>(&node->fanout), 
-                std::memory_order_acquire);
+            int pred = LR_PRED(node->a, node->b, key, node->fanout);
             
-            if (UNLIKELY(fanout <= 0)) {
-                return -1;  // Invalid fanout
-            }
-            
-            int pred = LR_PRED(node->a, node->b, key, fanout);
-            
-            // Bounds check with atomic fanout
-            if (UNLIKELY(pred < 0 || pred >= fanout)) {
+            // Bounds check
+            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
                 return -1;  // Invalid prediction
             }
             
-            // Read entry with memory fence for consistency
-            std::atomic_thread_fence(std::memory_order_acquire);
             dilaxPairEntry &kp = node->pe_data[pred];
-            std::atomic_thread_fence(std::memory_order_acquire);
             
-            keyType entry_key = kp.key;  // Local copy to avoid multiple reads
-            
-            if (entry_key == key) {
+            if (kp.key == key) {
                 return kp.ptr;
-            } else if (entry_key == -1) {
+            } else if (kp.key == -1) {
                 node = kp.child;
-                // No validation - trust the data structure integrity
-            } else if (entry_key == -2) {
+            } else if (kp.key == -2) {
                 fan2Leaf *child = kp.fan2child;
                 if (UNLIKELY(!child)) {
                     return -1;  // Null fan2child pointer
@@ -451,16 +395,14 @@ public:
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        // Completely lock-free range query - no versioning overhead
+        // Use exclusive lock for consistent range queries
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return 0;  // Tree not built yet
         }
         
-        // Direct lock-free access with memory fences for consistency
-        std::atomic_thread_fence(std::memory_order_acquire);
-        int result = root->range_query(k1, k2, ptrs);
-        std::atomic_thread_fence(std::memory_order_release);
-        return result;
+        // Exclusive lock ensures no race conditions
+        std::lock_guard<std::mutex> lock(tree_mutex);
+        return root->range_query(k1, k2, ptrs);
     }
 
 
