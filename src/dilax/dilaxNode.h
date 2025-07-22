@@ -197,6 +197,15 @@ struct dilaxNode{
         node_version_.store(new_version, std::memory_order_release);
     }
     
+    // Helper methods for XINDEX-style version checking
+    inline uint32_t get_version() const {
+        return node_version_.load(std::memory_order_acquire);
+    }
+    
+    inline bool is_locked(uint32_t version) const {
+        return (version & VERSION_LOCKED) != 0;
+    }
+    
     // Optimistic retry helper with exponential backoff
     template<typename Operation>
     inline auto retry_operation(Operation&& op, int max_retries = 10) const {

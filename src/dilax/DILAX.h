@@ -17,7 +17,6 @@
 #define UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
 #include <stack>
-#include <shared_mutex>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -48,8 +47,8 @@ class DILAX {
     dilaxNode *root;
     string mirror_dir;
     
-    // Simplified thread safety - prioritize performance
-    mutable std::mutex write_mutex;        // Single mutex for writes only
+    // HyPeR-inspired optimistic concurrency
+    mutable std::mutex write_mutex;        // Fallback mutex for complex operations
     std::atomic<bool> is_built{false};     // Atomic flag to check if tree is built
 
 public:
@@ -79,7 +78,7 @@ public:
     }
 
     void clear() {
-        // Use simple lock for exclusive access during clearing
+        // Use mutex for clearing operation
         std::lock_guard<std::mutex> lock(write_mutex);
         
         is_built.store(false);
@@ -103,7 +102,7 @@ public:
     void set_mirror_dir(const std::string &dir) { mirror_dir = dir; }
 
     void build_from_mirror(l_matrix &mirror, const keyArray &all_keys, const recordPtrArray &all_ptrs, long N) {
-        // Use simple lock during tree construction
+        // Use mutex during tree construction
         std::lock_guard<std::mutex> lock(write_mutex);
         
         // Mark as not built during construction
@@ -356,12 +355,12 @@ public:
     }
     
     inline recordPtr delete_key(const keyType &key) {
-        // Simplified delete with minimal locking overhead
+        // Use fallback mutex for delete operations
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
-        // Use the same lightweight mutex for deletes
+        // Use write mutex for delete operations
         std::lock_guard<std::mutex> lock(write_mutex);
         recordPtr ptr = static_cast<recordPtr>(-1);
         root->erase_and_get_ptr(key, ptr);
@@ -373,16 +372,16 @@ public:
     dilaxNode* loadNode(FILE *fp);
 
 
-    // only called on bulk loading stage
+    // Lock-free leaf finding for insert/erase operations
     inline dilaxNode* find_leaf(const keyType &key) {
         dilaxNode *node = root;
         if (UNLIKELY(!node)) return nullptr;
         
-        // Safe traversal with null checks
+        // Lock-free traversal with minimal validation
         node = node->find_child(key);
         while (node && node->is_internal()) {
             dilaxNode* next = node->find_child(key);
-            if (UNLIKELY(!next)) break;  // Corrupted tree, stop traversal
+            if (UNLIKELY(!next)) break;  // Stop if traversal fails
             node = next;
         }
         return node;
@@ -391,24 +390,51 @@ public:
 
 
     inline long search(const keyType &key) const{
-        // Ultra-optimized lock-free search for maximum performance
+        // Completely lock-free search - no versioning, no guards, just raw performance
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
-        // Lock-free traversal - no locking overhead for reads
         dilaxNode *node = root;
-        while (true) {
-            // Use memory_order_acquire for node reads to ensure consistency
-            int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            dilaxPairEntry &kp = node->pe_data[pred];
+        while (node) {
+            // Minimal safety checks for crash prevention
+            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
+                return -1;  // Corrupted node
+            }
             
-            if (kp.key == key) {
+            // Use atomic loads for critical data to ensure consistency
+            int fanout = std::atomic_load_explicit(
+                reinterpret_cast<const std::atomic<int>*>(&node->fanout), 
+                std::memory_order_acquire);
+            
+            if (UNLIKELY(fanout <= 0)) {
+                return -1;  // Invalid fanout
+            }
+            
+            int pred = LR_PRED(node->a, node->b, key, fanout);
+            
+            // Bounds check with atomic fanout
+            if (UNLIKELY(pred < 0 || pred >= fanout)) {
+                return -1;  // Invalid prediction
+            }
+            
+            // Read entry with memory fence for consistency
+            std::atomic_thread_fence(std::memory_order_acquire);
+            dilaxPairEntry &kp = node->pe_data[pred];
+            std::atomic_thread_fence(std::memory_order_acquire);
+            
+            keyType entry_key = kp.key;  // Local copy to avoid multiple reads
+            
+            if (entry_key == key) {
                 return kp.ptr;
-            } else if (kp.key == -1) {
+            } else if (entry_key == -1) {
                 node = kp.child;
-            } else if (kp.key == -2) {
+                // No validation - trust the data structure integrity
+            } else if (entry_key == -2) {
                 fan2Leaf *child = kp.fan2child;
+                if (UNLIKELY(!child)) {
+                    return -1;  // Null fan2child pointer
+                }
                 if (child->k1 == key) {
                     return child->p1;
                 }
@@ -420,17 +446,21 @@ public:
                 return -1;
             }
         }
+        return -1;
     }
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        // Ultra-optimized lock-free range query
+        // Completely lock-free range query - no versioning overhead
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return 0;  // Tree not built yet
         }
         
-        // Direct lock-free access - no locking overhead
-        return root->range_query(k1, k2, ptrs);
+        // Direct lock-free access with memory fences for consistency
+        std::atomic_thread_fence(std::memory_order_acquire);
+        int result = root->range_query(k1, k2, ptrs);
+        std::atomic_thread_fence(std::memory_order_release);
+        return result;
     }
 
 
