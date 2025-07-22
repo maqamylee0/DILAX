@@ -23,6 +23,9 @@
 #include <atomic>
 #include <future>
 #include <algorithm>
+#include <cstring>
+#include <chrono>
+#include <cstring>
 
 // Branch prediction hints for better performance
 #ifndef LIKELY
@@ -47,9 +50,10 @@ class DILAX {
     dilaxNode *root;
     string mirror_dir;
     
-    // Use simple exclusive mutex for complete consistency
-    mutable std::mutex tree_mutex;         // Exclusive lock for all operations
-    std::atomic<bool> is_built{false};     // Atomic flag to check if tree is built
+    // RCU-style optimistic concurrency control
+    mutable std::shared_mutex tree_mutex;       // Only for tree structure changes
+    mutable std::atomic<uint64_t> global_epoch{0}; // Global version counter  
+    std::atomic<bool> is_built{false};          // Atomic flag to check if tree is built
 
 public:
     //----for SOSD benchmark
@@ -79,7 +83,7 @@ public:
 
     void clear() {
         // Use exclusive lock for clearing operation
-        std::lock_guard<std::mutex> lock(tree_mutex);
+        std::unique_lock<std::shared_mutex> lock(tree_mutex);
         
         is_built.store(false);
         
@@ -103,7 +107,7 @@ public:
 
     void build_from_mirror(l_matrix &mirror, const keyArray &all_keys, const recordPtrArray &all_ptrs, long N) {
         // Use exclusive lock during tree construction
-        std::lock_guard<std::mutex> lock(tree_mutex);
+        std::unique_lock<std::shared_mutex> lock(tree_mutex);
         
         // Mark as not built during construction
         is_built.store(false);
@@ -275,15 +279,26 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Use exclusive lock for all operations to ensure complete consistency
-        std::lock_guard<std::mutex> lock(tree_mutex);
-        
-        // Find target node under exclusive lock
-        dilaxNode* target_node = find_leaf(key);
-        if (target_node) {
-            return target_node->insert(key, ptr);
+        // Minimal critical section - only protect tree structure changes
+        {
+            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+            
+            // Increment epoch to invalidate concurrent reads
+            global_epoch.fetch_add(1, std::memory_order_release);
+            
+            // Find target node under exclusive lock
+            dilaxNode* target_node = find_leaf(key);
+            if (target_node) {
+                bool result = target_node->insert(key, ptr);
+                
+                // Increment epoch again after modification
+                global_epoch.fetch_add(1, std::memory_order_release);
+                return result;
+            }
+            
+            global_epoch.fetch_add(1, std::memory_order_release);
+            return false;
         }
-        return false;
     };
     
     inline bool insert(const pair<keyType, recordPtr> &p) { 
@@ -294,16 +309,25 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Use exclusive lock for all operations to ensure complete consistency
-        std::lock_guard<std::mutex> lock(tree_mutex);
-        
-        // Find target node under exclusive lock
-        dilaxNode* target_node = find_leaf(key);
-        if (target_node) {
-            int result = target_node->erase(key);
-            return result >= 0;
+        // Minimal critical section with epoch tracking
+        {
+            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+            
+            // Increment epoch to invalidate concurrent reads
+            global_epoch.fetch_add(1, std::memory_order_release);
+            
+            dilaxNode* target_node = find_leaf(key);
+            if (target_node) {
+                int result = target_node->erase(key);
+                
+                // Increment epoch again after modification
+                global_epoch.fetch_add(1, std::memory_order_release);
+                return result >= 0;
+            }
+            
+            global_epoch.fetch_add(1, std::memory_order_release);
+            return false;
         }
-        return false;
     };
     
     inline recordPtr delete_key(const keyType &key) {
@@ -311,8 +335,8 @@ public:
             return -1;  // Tree not built yet
         }
         
-        // Use exclusive lock for all operations to ensure complete consistency
-        std::lock_guard<std::mutex> lock(tree_mutex);
+        // Use exclusive lock for writes
+        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         
         // Find target node under exclusive lock
         dilaxNode* target_node = find_leaf(key);
@@ -346,45 +370,94 @@ public:
 
 
     inline long search(const keyType &key) const{
-        // Use exclusive lock for reads to ensure complete consistency
+        // RCU-style optimistic read with epoch validation
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return -1;  // Tree not built yet
         }
         
-        // Exclusive lock ensures no race conditions with writers
-        std::lock_guard<std::mutex> lock(tree_mutex);
+        // Retry loop for optimistic reads
+        for (int attempt = 0; attempt < 10; ++attempt) {
+            // Capture epoch at start of read
+            uint64_t start_epoch = global_epoch.load(std::memory_order_acquire);
+            
+            // Completely lock-free read path with validation
+            dilaxNode *node = root;
+            while (node) {
+                // Quick validation - if epoch changed, restart
+                if (UNLIKELY(global_epoch.load(std::memory_order_relaxed) != start_epoch)) {
+                    break; // Restart read
+                }
+                
+                if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
+                    return -1;  // Corrupted node
+                }
+                
+                int pred = LR_PRED(node->a, node->b, key, node->fanout);
+                
+                if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
+                    return -1;  // Invalid prediction
+                }
+                
+                // Read entry atomically with memory barrier
+                dilaxPairEntry kp;
+                std::atomic_thread_fence(std::memory_order_acquire);
+                std::memcpy(&kp, &node->pe_data[pred], sizeof(dilaxPairEntry));
+                std::atomic_thread_fence(std::memory_order_acquire);
+                
+                // Final epoch validation before using result
+                if (UNLIKELY(global_epoch.load(std::memory_order_acquire) != start_epoch)) {
+                    break; // Restart read
+                }
+                
+                if (kp.key == key) {
+                    return kp.ptr;
+                } else if (kp.key == -1) {
+                    node = kp.child;
+                } else if (kp.key == -2) {
+                    fan2Leaf *child = kp.fan2child;
+                    if (UNLIKELY(!child)) {
+                        return -1;
+                    }
+                    if (child->k1 == key) {
+                        return child->p1;
+                    }
+                    if (child->k2 == key) {
+                        return child->p2;
+                    }
+                    return -1;
+                } else {
+                    return -1;
+                }
+            }
+            
+            // Exponential backoff for retry
+            if (attempt < 9) {
+                std::this_thread::sleep_for(std::chrono::nanoseconds(1 << attempt));
+            }
+        }
         
+        // Fallback to locked read after retries
+        std::shared_lock<std::shared_mutex> lock(tree_mutex);
         dilaxNode *node = root;
         while (node) {
-            // Safe to read with exclusive lock protecting us
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                return -1;  // Corrupted node
+                return -1;
             }
             
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            
-            // Bounds check
             if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                return -1;  // Invalid prediction
+                return -1;
             }
             
             dilaxPairEntry &kp = node->pe_data[pred];
-            
             if (kp.key == key) {
                 return kp.ptr;
             } else if (kp.key == -1) {
                 node = kp.child;
             } else if (kp.key == -2) {
                 fan2Leaf *child = kp.fan2child;
-                if (UNLIKELY(!child)) {
-                    return -1;  // Null fan2child pointer
-                }
-                if (child->k1 == key) {
-                    return child->p1;
-                }
-                if (child->k2 == key) {
-                    return child->p2;
-                }
+                if (child && child->k1 == key) return child->p1;
+                if (child && child->k2 == key) return child->p2;
                 return -1;
             } else {
                 return -1;
@@ -395,13 +468,28 @@ public:
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        // Use exclusive lock for consistent range queries
+        // RCU-style optimistic range query
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return 0;  // Tree not built yet
         }
         
-        // Exclusive lock ensures no race conditions
-        std::lock_guard<std::mutex> lock(tree_mutex);
+        // Try optimistic read first
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            uint64_t start_epoch = global_epoch.load(std::memory_order_acquire);
+            
+            int result = root->range_query(k1, k2, ptrs);
+            
+            // Validate epoch after range query
+            if (LIKELY(global_epoch.load(std::memory_order_acquire) == start_epoch)) {
+                return result;
+            }
+            
+            // Brief pause before retry
+            std::this_thread::sleep_for(std::chrono::nanoseconds(100 << attempt));
+        }
+        
+        // Fallback to locked range query
+        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         return root->range_query(k1, k2, ptrs);
     }
 
