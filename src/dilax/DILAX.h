@@ -274,15 +274,32 @@ public:
     }
 
     inline bool insert(const keyType &key, const recordPtr &ptr) { 
+        // HyPeR-inspired optimistic concurrency for better multi-threaded performance
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return false;  // Tree not built yet
         }
         
         // Simple approach: shared lock for finding, exclusive for writing
         // This avoids complex node-level locking overhead
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+         // Optimistic insert: find leaf with shared lock (allows concurrent reads)
+        dilaxNode* target_node;
+        {
+            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+            target_node = find_leaf(key);
+        }
         
-        dilaxNode* target_node = find_leaf(key);
+        if (!target_node) return false;
+        
+        // Try node-level optimistic write first
+        if (target_node->try_begin_write_operation()) {
+            bool result = target_node->insert(key, ptr);
+            target_node->end_write_operation();
+            return result;
+        }
+        
+        // If node-level lock fails, use minimal exclusive lock
+        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
+        target_node = find_leaf(key);  // Re-find under exclusive lock
         if (target_node) {
             return target_node->insert(key, ptr);
         }
