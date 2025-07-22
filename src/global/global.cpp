@@ -1,4 +1,5 @@
 #include "global.h"
+#include <atomic>
 
 //extern const double CACHE_MISS_LOSS = 1;
 //extern const double EXPANDING_RATIO = -1;
@@ -22,7 +23,7 @@ const long dilax_n_query_keys = 1000000l;
 long dilax_query_step = 100;
 long dilax_query_start_idx = dilax_query_step / 2;
 
-long dilax_num_adjust_stats = 0;
+std::atomic<long> dilax_num_adjust_stats{0};
 
 
 const double dilax_R1 = 25.0 / 130.0;

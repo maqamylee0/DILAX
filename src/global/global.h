@@ -1,5 +1,6 @@
 #include <vector>
 #include <iostream>
+#include <atomic>
 #include "global_typedef.h"
 
 #ifndef DILAX_GLOBAL_H
@@ -48,7 +49,7 @@ extern int dilax_buMinFan;
 extern double dilax_max_expanding_ratio;
 extern double dilax_retrain_threshold;
 
-extern long dilax_num_adjust_stats;
+extern std::atomic<long> dilax_num_adjust_stats;
 
 
 struct dilaxNode;

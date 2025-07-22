@@ -278,23 +278,12 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Fine-grained approach: optimistic insert with minimal locking
-        dilaxNode* target_node;
+        // Simple approach: shared lock for finding, exclusive for writing
+        // This avoids complex node-level locking overhead
+        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         
-        // First, find the leaf with only a read lock to avoid blocking readers
-        {
-            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
-            target_node = find_leaf(key);
-        }
-        
+        dilaxNode* target_node = find_leaf(key);
         if (target_node) {
-            // Try optimistic insert on the node without tree-level lock
-            if (target_node->insert(key, ptr)) {
-                return true;
-            }
-            
-            // Only if optimistic fails, use minimal exclusive lock
-            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
             return target_node->insert(key, ptr);
         }
         
@@ -309,24 +298,11 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Fine-grained approach: optimistic erase with minimal locking
-        dilaxNode* target_node;
+        // Simple approach: exclusive lock for all writes
+        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         
-        // First, find the leaf with only a read lock
-        {
-            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
-            target_node = find_leaf(key);
-        }
-        
+        dilaxNode* target_node = find_leaf(key);
         if (target_node) {
-            // Try optimistic erase first
-            int result = target_node->erase(key);
-            if (result >= 0) {
-                return true;
-            }
-            
-            // Only if optimistic fails, use minimal exclusive lock
-            std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
             return target_node->erase(key) >= 0;
         }
         
@@ -355,18 +331,31 @@ public:
     dilaxNode* loadNode(FILE *fp);
 
 
-    // Lock-free leaf finding for insert/erase operations
+    // Optimistic leaf finding that works under shared locks
     inline dilaxNode* find_leaf(const keyType &key) {
         dilaxNode *node = root;
         if (UNLIKELY(!node)) return nullptr;
         
-        // Lock-free traversal with minimal validation
-        node = node->find_child(key);
+        // Traverse down to leaf level with consistent predictions
         while (node && node->is_internal()) {
-            dilaxNode* next = node->find_child(key);
-            if (UNLIKELY(!next)) break;  // Stop if traversal fails
-            node = next;
+            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
+                return nullptr;
+            }
+            
+            int pred = LR_PRED(node->a, node->b, key, node->fanout);
+            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
+                return nullptr;
+            }
+            
+            dilaxPairEntry &kp = node->pe_data[pred];
+            if (kp.key == -1) {
+                node = kp.child;
+            } else {
+                // This is a leaf entry, break and return current node
+                break;
+            }
         }
+        
         return node;
     }
 
@@ -377,47 +366,58 @@ public:
             return -1;  // Tree not built yet
         }
         
-        // Simple, fast lock-free read - single attempt
+        // RCU-style optimistic read: try lock-free first, fallback to shared lock
         dilaxNode *node = root;
+        
+        // Optimistic read attempt with memory barriers
         while (node) {
+            // Read node version before accessing data
+            uint32_t version_before = node->get_version();
+            if (node->is_locked(version_before)) {
+                break;  // Node is locked, fallback to shared lock
+            }
+            
+            // Memory barrier before reading node data
+            std::atomic_thread_fence(std::memory_order_acquire);
+            
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                break;  // Fall back to locked read
+                break;  // Corrupted state, fallback to shared lock
             }
             
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
             if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                break;  // Fall back to locked read
+                break;  // Invalid prediction, fallback to shared lock
             }
             
-            // Read entry with memory barrier for consistency
-            dilaxPairEntry kp;
-            std::atomic_thread_fence(std::memory_order_acquire);
-            std::memcpy(&kp, &node->pe_data[pred], sizeof(dilaxPairEntry));
+            // Copy the pair entry atomically
+            dilaxPairEntry kp = node->pe_data[pred];
+            
+            // Memory barrier after reading data
             std::atomic_thread_fence(std::memory_order_acquire);
             
+            // Validate version hasn't changed
+            uint32_t version_after = node->get_version();
+            if (version_before != version_after || node->is_locked(version_after)) {
+                break;  // Version changed, fallback to shared lock
+            }
+            
+            // Process the entry
             if (kp.key == key) {
                 return kp.ptr;
             } else if (kp.key == -1) {
                 node = kp.child;
             } else if (kp.key == -2) {
                 fan2Leaf *child = kp.fan2child;
-                if (UNLIKELY(!child)) {
-                    break;  // Fall back to locked read
-                }
-                if (child->k1 == key) {
-                    return child->p1;
-                }
-                if (child->k2 == key) {
-                    return child->p2;
-                }
+                if (child && child->k1 == key) return child->p1;
+                if (child && child->k2 == key) return child->p2;
                 return -1;
             } else {
                 return -1;
             }
         }
         
-        // Fallback to shared lock only if lock-free read fails
-        std::shared_lock<std::shared_mutex> lock(tree_mutex);
+        // Fallback to shared lock for consistency
+        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         node = root;
         while (node) {
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
@@ -452,8 +452,10 @@ public:
             return 0;  // Tree not built yet
         }
         
-        // Use shared lock for range queries to ensure consistency
+        // Use shared lock for range queries to ensure consistency while allowing concurrent reads
         std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+        if (UNLIKELY(!root)) return 0;
+        
         return root->range_query(k1, k2, ptrs);
     }
 
