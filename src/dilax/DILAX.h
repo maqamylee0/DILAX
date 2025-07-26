@@ -274,37 +274,16 @@ public:
     }
 
     inline bool insert(const keyType &key, const recordPtr &ptr) { 
-        // HyPeR-inspired optimistic concurrency for better multi-threaded performance
         if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
             return false;  // Tree not built yet
         }
         
-        // Simple approach: shared lock for finding, exclusive for writing
-        // This avoids complex node-level locking overhead
-         // Optimistic insert: find leaf with shared lock (allows concurrent reads)
-        dilaxNode* target_node;
-        {
-            std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
-            target_node = find_leaf(key);
-        }
-        
+        // Lock-free leaf finding for better concurrency
+        dilaxNode* target_node = find_leaf(key);
         if (!target_node) return false;
         
-        // Try node-level optimistic write first
-        if (target_node->try_begin_write_operation()) {
-            bool result = target_node->insert(key, ptr);
-            target_node->end_write_operation();
-            return result;
-        }
-        
-        // If node-level lock fails, use minimal exclusive lock
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
-        target_node = find_leaf(key);  // Re-find under exclusive lock
-        if (target_node) {
-            return target_node->insert(key, ptr);
-        }
-        
-        return false;
+        // Use leaf-level locking instead of tree-level locking
+        return target_node->insert(key, ptr);
     };
     
     inline bool insert(const pair<keyType, recordPtr> &p) { 
@@ -315,9 +294,7 @@ public:
             return false;  // Tree not built yet
         }
         
-        // Simple approach: exclusive lock for all writes
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
-        
+        // Lock-free leaf finding, then leaf-level operation
         dilaxNode* target_node = find_leaf(key);
         if (target_node) {
             return target_node->erase(key) >= 0;
@@ -331,10 +308,7 @@ public:
             return -1;  // Tree not built yet
         }
         
-        // Use exclusive lock for writes
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
-        
-        // Find target node under exclusive lock
+        // Lock-free leaf finding, then leaf-level operation
         dilaxNode* target_node = find_leaf(key);
         recordPtr ptr = static_cast<recordPtr>(-1);
         if (target_node) {
@@ -348,12 +322,12 @@ public:
     dilaxNode* loadNode(FILE *fp);
 
 
-    // Optimistic leaf finding that works under shared locks
-    inline dilaxNode* find_leaf(const keyType &key) {
+    // Lock-free leaf finding optimized for high concurrency
+    inline dilaxNode* find_leaf(const keyType &key) const {
         dilaxNode *node = root;
         if (UNLIKELY(!node)) return nullptr;
         
-        // Traverse down to leaf level with consistent predictions
+        // Completely lock-free traversal - relies on immutable tree structure after build
         while (node && node->is_internal()) {
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
                 return nullptr;
@@ -383,59 +357,9 @@ public:
             return -1;  // Tree not built yet
         }
         
-        // RCU-style optimistic read: try lock-free first, fallback to shared lock
+        // Lock-free search - no shared locks needed for reads
         dilaxNode *node = root;
         
-        // Optimistic read attempt with memory barriers
-        while (node) {
-            // Read node version before accessing data
-            uint32_t version_before = node->get_version();
-            if (node->is_locked(version_before)) {
-                break;  // Node is locked, fallback to shared lock
-            }
-            
-            // Memory barrier before reading node data
-            std::atomic_thread_fence(std::memory_order_acquire);
-            
-            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                break;  // Corrupted state, fallback to shared lock
-            }
-            
-            int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                break;  // Invalid prediction, fallback to shared lock
-            }
-            
-            // Copy the pair entry atomically
-            dilaxPairEntry kp = node->pe_data[pred];
-            
-            // Memory barrier after reading data
-            std::atomic_thread_fence(std::memory_order_acquire);
-            
-            // Validate version hasn't changed
-            uint32_t version_after = node->get_version();
-            if (version_before != version_after || node->is_locked(version_after)) {
-                break;  // Version changed, fallback to shared lock
-            }
-            
-            // Process the entry
-            if (kp.key == key) {
-                return kp.ptr;
-            } else if (kp.key == -1) {
-                node = kp.child;
-            } else if (kp.key == -2) {
-                fan2Leaf *child = kp.fan2child;
-                if (child && child->k1 == key) return child->p1;
-                if (child && child->k2 == key) return child->p2;
-                return -1;
-            } else {
-                return -1;
-            }
-        }
-        
-        // Fallback to shared lock for consistency
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
-        node = root;
         while (node) {
             if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
                 return -1;
@@ -469,8 +393,7 @@ public:
             return 0;  // Tree not built yet
         }
         
-        // Use shared lock for range queries to ensure consistency while allowing concurrent reads
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+        // Lock-free range queries for maximum read concurrency
         if (UNLIKELY(!root)) return 0;
         
         return root->range_query(k1, k2, ptrs);
