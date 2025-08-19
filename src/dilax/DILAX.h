@@ -227,11 +227,6 @@ public:
     }
 
     size_t total_size() const{
-        // Simple check without locking for read-only operation
-        if (!is_built.load() || !root) {
-            return 0;
-        }
-        
         std::stack<dilaxNode*> s;
         s.push(root);
 
@@ -274,21 +269,12 @@ public:
     }
 
     inline bool insert(const keyType &key, const recordPtr &ptr) { 
-        // HyPeR-inspired optimistic concurrency for better multi-threaded performance
-        if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
-            return false;  // Tree not built yet
-        }
-        
-        // Simple approach: shared lock for finding, exclusive for writing
-        // This avoids complex node-level locking overhead
-         // Optimistic insert: find leaf with shared lock (allows concurrent reads)
+        // Optimistic insert: find leaf with shared lock (allows concurrent reads)
         dilaxNode* target_node;
         {
             std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
             target_node = find_leaf(key);
         }
-        
-        if (!target_node) return false;
         
         // Try node-level optimistic write first
         if (target_node->try_begin_write_operation()) {
@@ -300,46 +286,28 @@ public:
         // If node-level lock fails, use minimal exclusive lock
         std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         target_node = find_leaf(key);  // Re-find under exclusive lock
-        if (target_node) {
-            return target_node->insert(key, ptr);
-        }
-        
-        return false;
+        return target_node->insert(key, ptr);
     };
     
     inline bool insert(const pair<keyType, recordPtr> &p) { 
         return insert(p.first, p.second); 
     };
     inline bool erase(const keyType &key) { 
-        if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
-            return false;  // Tree not built yet
-        }
-        
         // Simple approach: exclusive lock for all writes
         std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         
         dilaxNode* target_node = find_leaf(key);
-        if (target_node) {
-            return target_node->erase(key) >= 0;
-        }
-        
-        return false;
+        return target_node->erase(key) >= 0;
     };
     
     inline recordPtr delete_key(const keyType &key) {
-        if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
-            return -1;  // Tree not built yet
-        }
-        
         // Use exclusive lock for writes
         std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         
         // Find target node under exclusive lock
         dilaxNode* target_node = find_leaf(key);
         recordPtr ptr = static_cast<recordPtr>(-1);
-        if (target_node) {
-            target_node->erase_and_get_ptr(key, ptr);
-        }
+        target_node->erase_and_get_ptr(key, ptr);
         return ptr;
     }
 
@@ -351,18 +319,10 @@ public:
     // Optimistic leaf finding that works under shared locks
     inline dilaxNode* find_leaf(const keyType &key) {
         dilaxNode *node = root;
-        if (UNLIKELY(!node)) return nullptr;
         
         // Traverse down to leaf level with consistent predictions
         while (node && node->is_internal()) {
-            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                return nullptr;
-            }
-            
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                return nullptr;
-            }
             
             dilaxPairEntry &kp = node->pe_data[pred];
             if (kp.key == -1) {
@@ -379,10 +339,6 @@ public:
 
 
     inline long search(const keyType &key) const {
-        if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
-            return -1;  // Tree not built yet
-        }
-        
         // RCU-style optimistic read: try lock-free first, fallback to shared lock
         dilaxNode *node = root;
         
@@ -397,14 +353,7 @@ public:
             // Memory barrier before reading node data
             std::atomic_thread_fence(std::memory_order_acquire);
             
-            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                break;  // Corrupted state, fallback to shared lock
-            }
-            
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                break;  // Invalid prediction, fallback to shared lock
-            }
             
             // Copy the pair entry atomically
             dilaxPairEntry kp = node->pe_data[pred];
@@ -437,14 +386,7 @@ public:
         std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         node = root;
         while (node) {
-            if (UNLIKELY(!node->pe_data || node->fanout <= 0)) {
-                return -1;
-            }
-            
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            if (UNLIKELY(pred < 0 || pred >= node->fanout)) {
-                return -1;
-            }
             
             dilaxPairEntry &kp = node->pe_data[pred];
             if (kp.key == key) {
@@ -465,13 +407,8 @@ public:
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        if (UNLIKELY(!is_built.load(std::memory_order_acquire))) {
-            return 0;  // Tree not built yet
-        }
-        
         // Use shared lock for range queries to ensure consistency while allowing concurrent reads
         std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
-        if (UNLIKELY(!root)) return 0;
         
         return root->range_query(k1, k2, ptrs);
     }

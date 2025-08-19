@@ -344,17 +344,7 @@ struct dilaxNode{
         // HyPeR-inspired optimistic read with validation
         OptimisticReadGuard guard(this);
         
-        // Safety checks
-        if (!pe_data || fanout <= 0) {
-            return -1;
-        }
-        
         int pred = LR_PRED(a, b, key, fanout);
-        
-        // Clamp pred to valid bounds
-        if (pred < 0) pred = 0;
-        if (pred >= fanout) pred = fanout - 1;
-        
         dilaxPairEntry &pe = pe_data[pred];
         
         if (pe.key == key) {
@@ -558,22 +548,8 @@ struct dilaxNode{
 
     inline dilaxNode* find_child(const keyType &key) {
         int i = LR_PRED(a, b, key, fanout);
-        if (UNLIKELY(i < 0 || i >= fanout || !pe_data)) {
-            return nullptr;  // Safety check for corrupted state
-        }
-        
-        // Critical fix: Only return child if this is actually a child pointer
         dilaxPairEntry &pe = pe_data[i];
-        if (pe.key == -1) {
-            return pe.child;  // This is a child pointer
-        } else if (pe.key == -2) {
-            // This is a fan2Leaf, we need to handle it differently
-            // For now, return nullptr to indicate it's not a regular child
-            return nullptr;
-        } else {
-            // This is a data entry, not a child pointer
-            return nullptr;
-        }
+        return pe.child;
     }
 
 
@@ -590,14 +566,7 @@ struct dilaxNode{
         pe_data[pos0].assign(k0, p0);
         pe_data[pos1].assign(k1, p1);
         pe_data[pos2].assign(k2, p2);
-        
-        // Safety check: if positions are not monotonic, fall back to even distribution
-        if (!(pos0 < pos1 && pos1 < pos2)) {
-            pe_data[0].assign(k0, p0);
-            pe_data[fanout/2].assign(k1, p1);
-            pe_data[fanout-1].assign(k2, p2);
-        }
-        
+        assert(pos0 < pos1 && pos1 < pos2);
         total_n_travs = 3;
         avg_n_travs_since_last_dist = 1;
     }
@@ -617,16 +586,7 @@ struct dilaxNode{
         pe_data[pos0].assign(k0, _ptrs[0]);
         pe_data[pos1].assign(k1, _ptrs[1]);
         pe_data[pos2].assign(k2, _ptrs[2]);
-        
-        // Safety check: if positions are not monotonic, this indicates 
-        // a problem with linear regression, but we should handle it gracefully
-        if (!(pos0 < pos1 && pos1 < pos2)) {
-            // Fall back to even distribution to avoid crashes
-            pe_data[0].assign(k0, _ptrs[0]);
-            pe_data[fanout/2].assign(k1, _ptrs[1]);
-            pe_data[fanout-1].assign(k2, _ptrs[2]);
-        }
-        
+        assert(pos0 < pos1 && pos1 < pos2);
         total_n_travs = 3;
         avg_n_travs_since_last_dist = 1;
     }
@@ -886,26 +846,11 @@ struct dilaxNode{
         int last_pos = LR_PRED(a, b, last_key, fanout);
 
         keyType final_key = keys[num_nonempty - 1];
-//    int final_pos = LR_PRED(a, b, final_key, fanout);
         if (b < 0 || last_pos == LR_PRED(a, b, final_key, fanout)) {
             dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
             last_pos = LR_PRED(a, b, last_key, fanout);
             int final_pos = LR_PRED(a, b, final_key, fanout);
-            
-            // If linear regression still fails to provide separation, force it
-            if (last_pos == final_pos) {
-                // Fall back to manual distribution
-                a = 0.0;
-                b = 1.0 * (fanout - 1) / (final_key - last_key + 1);
-                last_pos = LR_PRED(a, b, last_key, fanout);
-                final_pos = LR_PRED(a, b, final_key, fanout);
-                
-                // Final fallback: ensure at least 1 position difference
-                if (last_pos == final_pos) {
-                    last_pos = 0;
-                    final_pos = std::min(1, fanout - 1);
-                }
-            }
+            assert(last_pos != final_pos);
         }
 
         assert(b >= 0);
@@ -915,10 +860,7 @@ struct dilaxNode{
             assert (key != last_key);
             pos = LR_PRED(a, b, key, fanout);
 
-            // Ensure monotonic positions instead of asserting
-            if (pos < last_pos) {
-                pos = last_pos;
-            }
+            assert(pos >= last_pos);
 
             if (pos != last_pos) {
                 if (k_id == last_k_id + 1) {
@@ -952,14 +894,8 @@ struct dilaxNode{
             }
         }
 
-        // Handle case where all keys map to same position
-        if (last_k_id == 0) {
-            // Force a position change to ensure progress
-            pos = std::min(last_pos + 1, fanout - 1);
-            last_k_id = num_nonempty - 1;  // Process all remaining keys as one child
-        }
-        
-        // pos is guaranteed to be >= last_pos due to monotonic enforcement above
+        assert(last_k_id != 0);
+        assert(pos >= last_pos);
         if (last_k_id == num_nonempty - 1) {
             ++total_n_travs;
             pe_data[pos].assign(keys[num_nonempty - 1], ptrs[num_nonempty - 1]);
@@ -1010,17 +946,7 @@ struct dilaxNode{
 
 
     inline bool insert(const keyType &_key, const recordPtr &_ptr) {
-        // Safety checks to prevent segmentation faults
-        if (!pe_data || fanout <= 0) {
-            return false;
-        }
-        
         int pred = LR_PRED(a, b, _key, fanout);
-        
-        // Clamp pred to valid bounds instead of failing
-        if (pred < 0) pred = 0;
-        if (pred >= fanout) pred = fanout - 1;
-        
         dilaxPairEntry &pe = pe_data[pred];
 //    if (print) {
 //        cout << "_key = " << _key << ", pe.key = " << pe.key << ", fanout = " << fanout << ", pred = " << pred << ", num_nonempty = " << num_nonempty << endl;
@@ -1111,17 +1037,7 @@ struct dilaxNode{
 
 
     inline int erase(const keyType &_key) {
-        // Safety checks to prevent segmentation faults
-        if (!pe_data || fanout <= 0) {
-            return -1;
-        }
-        
         int pred = LR_PRED(a, b, _key, fanout);
-        
-        // Clamp pred to valid bounds instead of failing
-        if (pred < 0) pred = 0;
-        if (pred >= fanout) pred = fanout - 1;
-        
         dilaxPairEntry &pe = pe_data[pred];
         if (pe.key == _key) {
             pe.setNull();
@@ -1168,17 +1084,7 @@ struct dilaxNode{
         }
     }
     inline int erase_and_get_ptr(const keyType &_key, recordPtr &ptr) {
-        // Safety checks to prevent segmentation faults
-        if (!pe_data || fanout <= 0) {
-            return -1;
-        }
-        
         int pred = LR_PRED(a, b, _key, fanout);
-        
-        // Clamp pred to valid bounds instead of failing
-        if (pred < 0) pred = 0;
-        if (pred >= fanout) pred = fanout - 1;
-        
         dilaxPairEntry &pe = pe_data[pred];
         if (pe.key == _key) {
             ptr = pe.ptr;
@@ -1252,12 +1158,7 @@ struct dilaxNode{
         }
         delete[] pe_data;
         pe_data = NULL;
-        
-        // Handle potential inconsistency in concurrent scenarios
-        if (j != num_nonempty) {
-            // Update num_nonempty to reflect actual collected count
-            num_nonempty = j;
-        }
+        assert(j == num_nonempty);
     }
 
     void collect_all_keys(keyType *keys) {
@@ -1296,13 +1197,7 @@ struct dilaxNode{
                 }
             }
         }
-        
-        // Handle potential inconsistency in concurrent scenarios
-        if (j != num_nonempty) {
-            // In concurrent scenarios, the count might be inconsistent
-            // Log the discrepancy but don't crash
-            num_nonempty = j;
-        }
+        assert(j == num_nonempty);
     }
 
 };
