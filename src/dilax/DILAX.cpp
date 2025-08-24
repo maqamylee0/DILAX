@@ -27,6 +27,35 @@
 using namespace std;
 
 
+// Define EBR static members to avoid multiple definition errors
+thread_local uint64_t EBR::localEpoch = 0;
+std::atomic<uint64_t> EBR::globalEpoch{1};
+std::atomic<void*> EBR::pendingDeletes[3] = {nullptr, nullptr, nullptr};
+std::mutex EBR::deleteMutex;
+
+// Make dilax auxiliary variables thread-local for concurrent access
+namespace dilax_auxiliary {
+    thread_local keyType *retrain_keys = nullptr;
+    thread_local recordPtr *retrain_ptrs = nullptr;
+    
+    void init_insert_aux_vars() {
+        if (!retrain_keys) {
+            retrain_keys = new keyType[10000];  // Allocate sufficient space
+        }
+        if (!retrain_ptrs) {
+            retrain_ptrs = new recordPtr[10000]; // Allocate sufficient space  
+        }
+    }
+    
+    void free_insert_aux_vars() {
+        delete[] retrain_keys;
+        delete[] retrain_ptrs;
+        retrain_keys = nullptr;
+        retrain_ptrs = nullptr;
+    }
+}
+
+
 //let i = returned value,  range_tos[i] <= key < range_tos[i+1]
 namespace dilaxFunc {
     pair<dilaxNode **, double *>
@@ -53,7 +82,11 @@ namespace dilaxFunc {
         for (int i = 0; i < n_parents; ++i) {
             dilaxNode *parent = parents[i];
             int fanout = parent->fanout;
-            parent->pe_data = new dilaxPairEntry[fanout];
+            parent->pe_data = new OptimisticDilaxPairEntry[fanout];
+            // Initialize all entries
+            for (int i = 0; i < fanout; ++i) {
+                parent->pe_data[i].setNull();
+            }
             double range_from = parents_range_froms[i];
             double parent_range_to = parents_range_froms[i + 1];
 //        parent->children = new dilaxNode*[fanout];

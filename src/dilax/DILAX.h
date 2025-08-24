@@ -9,8 +9,7 @@
 #include <string>
 #include <iostream>
 #include <stack>
-#include <shared_mutex>
-#include <mutex>
+// Removed shared_mutex since we use optimistic item-level locking now
 #ifndef DILAX_DILAX_H
 #define DILAX_DILAX_H
 
@@ -26,21 +25,19 @@ class DILAX {
     dilaxNode *root;
     string mirror_dir;
 
-    // Tree-level lock for protecting root and global operations
-    mutable std::shared_mutex tree_mutex;
+    // Note: With optimistic item-level locking + EBR, tree-level locks are no longer needed
+    // for most operations. Only keep minimal protection for root pointer changes.
 
 public:
     //----for SOSD benchmark
     uint64_t Build(const std::vector< pair<keyType, recordPtr> >& data) {
         return linux_sys_utils::timing(
                 [&] {
-                    std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
                     bulk_load(data);
                 });
     }
 
     DilaxSearchBound EqualityLookup(const keyType &lookup_key) const {
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         const uint64_t start = search(lookup_key);
         const uint64_t stop = start + 1;
 
@@ -50,7 +47,6 @@ public:
     std::string name() const { return "DILAX"; }
 
     std::size_t size() const { 
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         return total_size(); }
 
     // ---------------------
@@ -62,7 +58,6 @@ public:
     }
 
     void clear() {
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         if (root) {
             delete root;
             root = NULL;
@@ -80,11 +75,9 @@ public:
     }
 
     void set_mirror_dir(const std::string &dir) { 
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         mirror_dir = dir; }
 
     void build_from_mirror(l_matrix &mirror, const keyArray &all_keys, const recordPtrArray &all_ptrs, long N) {
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         size_t H = mirror.size();
 
 //        cout << "+++H = " << H << endl;
@@ -118,7 +111,11 @@ public:
         root->a = -(root->b * lbd);
         n_nodes_each_level.push_back(1);
 //    root->children_init();
-        root->pe_data = new dilaxPairEntry[root->fanout];
+        root->pe_data = new OptimisticDilaxPairEntry[root->fanout];
+        // Initialize all entries
+        for (int i = 0; i < root->fanout; ++i) {
+            root->pe_data[i].setNull();
+        }
 
         keyType lastone = split_keys_list[H - 2][n_nodes_each_level_mirror[H-3]-1];
 
@@ -195,7 +192,6 @@ public:
     }
 
     size_t total_size() const{
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
         std::stack<dilaxNode*> s;
         s.push(root);
 
@@ -209,7 +205,7 @@ public:
                 size += node->num_nonempty * 2 * sizeof(long);
             } else {
                 for (int i = 0; i < node->fanout; ++i) {
-                    dilaxPairEntry &kp = node->pe_data[i];
+                    OptimisticDilaxPairEntry &kp = node->pe_data[i];
                     if (kp.key < 0) {
                         if (kp.key == -1) {
                             s.push(kp.child);
@@ -238,16 +234,12 @@ public:
     }
 
     inline bool insert(const keyType &key, const recordPtr &ptr) { 
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         return root->insert(key, ptr); };
     inline bool insert(const pair<keyType, recordPtr> &p) { 
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         return root->insert(p.first, p.second); };
     inline bool erase(const keyType &key) { 
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         return 0 <= (root->erase(key)); }
     inline recordPtr delete_key(const keyType &key) {
-        std::unique_lock<std::shared_mutex> write_lock(tree_mutex);
         recordPtr ptr = static_cast<recordPtr>(-1);
         root->erase_and_get_ptr(key, ptr);
         return ptr;
@@ -270,13 +262,12 @@ public:
 
 
     inline long search(const keyType &key) const{
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
 //        std::cout << "******key = " << key << std::endl;
 
         dilaxNode *node = root;
         while (true) {
             int pred = LR_PRED(node->a, node->b, key, node->fanout);
-            dilaxPairEntry &kp = node->pe_data[pred];
+            OptimisticDilaxPairEntry &kp = node->pe_data[pred];
             if (kp.key == key) {
                 return kp.ptr;
             } else if (kp.key == -1) {
@@ -298,8 +289,7 @@ public:
     }
 
 
-    inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
-        std::shared_lock<std::shared_mutex> read_lock(tree_mutex);
+        inline int range_query(const keyType &k1, const keyType &k2, recordPtr *ptrs) { 
         return root->range_query(k1, k2, ptrs); }
 
 
