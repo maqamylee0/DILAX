@@ -7,22 +7,11 @@
 #include <cmath>
 #include <cassert>
 #include <stack>
-#include <atomic>
-#include <vector>
-#include <future>
-#include <thread>
-#include <chrono>
+#include <shared_mutex>
+#include <mutex>
 #include "../global/global.h"
 #include "../global/fan2Leaf.h"
 //#include "../global/linearReg.h"
-
-// Performance optimization macros
-#ifndef LIKELY
-#define LIKELY(x)   __builtin_expect(!!(x), 1)
-#endif
-#ifndef UNLIKELY
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#endif
 
 #ifndef DILAX_DILAXNODE_H
 #define DILAX_DILAXNODE_H
@@ -33,11 +22,10 @@ struct dilaxNode;
 struct fan2Leaf;
 
 namespace dilax_auxiliary {
-    extern thread_local keyType *retrain_keys;
-    extern thread_local recordPtr *retrain_ptrs;
+    extern keyType *retrain_keys;
+    extern recordPtr *retrain_ptrs;
     void init_insert_aux_vars();
     void free_insert_aux_vars();
-    void ensure_thread_aux_vars();  // Ensure thread-local variables are initialized
 }
 
 namespace dilax {
@@ -116,28 +104,22 @@ inline void linearReg_w_expanding(const keyType *X, double &a, double &b, int n,
 } // namespace dilax
 
 struct dilaxNode{
-    int fanout;
-    int meta_info;
-    double a;
-    double b;
-    int num_nonempty;
+     int fanout;
+     int meta_info;
+     double a;
+     double b;
+     int num_nonempty;
 
-    dilaxPairEntry *pe_data;
+     dilaxPairEntry *pe_data;
 
-    double avg_n_travs_since_last_dist;
-    long total_n_travs;
-    long last_total_n_travs;
-    int last_nn;
-    int n_adjust;
+    // Per-node lock for fine-grained concurrency
+    mutable std::shared_mutex node_mutex;
 
-    // Thread-safety: HyPeR-inspired fine-grained concurrency
-    mutable std::atomic<uint32_t> node_version_;     // Version counter for optimistic reads
-    mutable std::atomic<bool> is_obsolete_;          // Node obsolescence flag
-    mutable std::atomic<int> active_operations_;     // Count of active operations
-    
-    // Lock constants for optimistic concurrency
-    static constexpr uint32_t VERSION_LOCKED = 0x80000000U;  // Lock bit in version
-    static constexpr uint32_t VERSION_MASK = 0x7FFFFFFFU;    // Version counter mask
+     double avg_n_travs_since_last_dist;
+     long total_n_travs;
+     long last_total_n_travs;
+     int last_nn;
+     int n_adjust;
 
 
 
@@ -152,118 +134,6 @@ struct dilaxNode{
 
     inline int get_n_adjust() { return n_adjust; }
     inline void inc_n_adjust() { ++n_adjust; }
-
-    // HyPeR-inspired optimistic concurrency control
-    inline uint32_t begin_read_operation() const {
-        active_operations_.fetch_add(1, std::memory_order_acquire);
-        uint32_t version = node_version_.load(std::memory_order_acquire);
-        
-        // Spin while locked or obsolete
-        while ((version & VERSION_LOCKED) || is_obsolete_.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-            version = node_version_.load(std::memory_order_acquire);
-        }
-        return version & VERSION_MASK;
-    }
-    
-    inline bool end_read_operation(uint32_t start_version) const {
-        active_operations_.fetch_sub(1, std::memory_order_release);
-        uint32_t end_version = node_version_.load(std::memory_order_acquire);
-        
-        // Check if version changed or node became obsolete
-        return (end_version & VERSION_MASK) == start_version && 
-               !is_obsolete_.load(std::memory_order_acquire);
-    }
-    
-    inline bool try_begin_write_operation() const {
-        // Try to lock the version counter
-        uint32_t current_version = node_version_.load(std::memory_order_acquire);
-        if (current_version & VERSION_LOCKED) return false;
-        if (is_obsolete_.load(std::memory_order_acquire)) return false;
-        
-        uint32_t locked_version = current_version | VERSION_LOCKED;
-        return node_version_.compare_exchange_strong(current_version, locked_version, 
-                                                   std::memory_order_acq_rel);
-    }
-    
-    inline void end_write_operation() const {
-        // Wait for all active operations to complete
-        while (active_operations_.load(std::memory_order_acquire) > 0) {
-            std::this_thread::yield();
-        }
-        
-        // Increment version and release lock
-        uint32_t current = node_version_.load(std::memory_order_acquire);
-        uint32_t new_version = ((current & VERSION_MASK) + 1) & VERSION_MASK;
-        node_version_.store(new_version, std::memory_order_release);
-    }
-    
-    // Helper methods for XINDEX-style version checking
-    inline uint32_t get_version() const {
-        return node_version_.load(std::memory_order_acquire);
-    }
-    
-    inline bool is_locked(uint32_t version) const {
-        return (version & VERSION_LOCKED) != 0;
-    }
-    
-    // Optimistic retry helper with exponential backoff
-    template<typename Operation>
-    inline auto retry_operation(Operation&& op, int max_retries = 10) const {
-        for (int attempt = 0; attempt < max_retries; ++attempt) {
-            try {
-                return op();
-            } catch (const std::exception&) {
-                if (attempt == max_retries - 1) throw;
-                
-                // Exponential backoff
-                std::this_thread::sleep_for(std::chrono::microseconds(1 << std::min(attempt, 6)));
-            }
-        }
-    }
-    
-    // HyPeR-inspired RAII guards for optimistic concurrency
-    class OptimisticReadGuard {
-        const dilaxNode* node_;
-        uint32_t start_version_;
-        bool valid_;
-    public:
-        explicit OptimisticReadGuard(const dilaxNode* node) : node_(node), valid_(true) {
-            start_version_ = node_->begin_read_operation();
-        }
-        
-        ~OptimisticReadGuard() {
-            if (valid_) {
-                valid_ = node_->end_read_operation(start_version_);
-            }
-        }
-        
-        bool validate() {
-            if (!valid_) return false;
-            valid_ = node_->end_read_operation(start_version_);
-            if (valid_) {
-                start_version_ = node_->begin_read_operation();
-            }
-            return valid_;
-        }
-        
-        bool is_valid() const { return valid_; }
-    };
-    
-    class WriteGuard {
-        const dilaxNode* node_;
-        bool locked_;
-    public:
-        explicit WriteGuard(const dilaxNode* node) : node_(node), locked_(false) {
-            locked_ = node_->try_begin_write_operation();
-        }
-        
-        ~WriteGuard() {
-            if (locked_) node_->end_write_operation();
-        }
-        
-        bool is_locked() const { return locked_; }
-    };
 
 
     inline void set_num_nonempty(int n) { num_nonempty = n; }
@@ -281,8 +151,7 @@ struct dilaxNode{
 
 
     dilaxNode(bool _is_internal): a(0), b(0), meta_info(_is_internal), fanout(0), pe_data(NULL), n_adjust(30), num_nonempty(0),
-                                 total_n_travs(0), last_total_n_travs(0), last_nn(0), avg_n_travs_since_last_dist(1e10),
-                                 node_version_(0), is_obsolete_(false), active_operations_(0) {}
+                                 total_n_travs(0), last_total_n_travs(0), last_nn(0), avg_n_travs_since_last_dist(1e10)  {}
 
     inline void init(const int &_num_nonempty) {
         num_nonempty = _num_nonempty;
@@ -292,10 +161,6 @@ struct dilaxNode{
     }
 
     inline void inc_num_nonempty() { ++num_nonempty; }
-    inline void atomic_inc_num_nonempty() { 
-        std::atomic<int>* atomic_num = reinterpret_cast<std::atomic<int>*>(&num_nonempty);
-        atomic_num->fetch_add(1, std::memory_order_relaxed);
-    }
     inline int get_num_nonempty() { return num_nonempty; }
 
     int cal_num_nonempty() {
@@ -341,309 +206,311 @@ struct dilaxNode{
 
 
     inline recordPtr leaf_find(const keyType &key) const {
-        // HyPeR-inspired optimistic read with validation
-        OptimisticReadGuard guard(this);
-        
-        int pred = LR_PRED(a, b, key, fanout);
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int pred = LR_PRED(a, b, key, fanout);
+//        cout << "pred = " << pred << endl;
         dilaxPairEntry &pe = pe_data[pred];
-        
+//        cout << "pe.key = " << pe.key << endl;
         if (pe.key == key) {
-            return guard.is_valid() ? pe.ptr : leaf_find(key); // Retry if invalid
+            return pe.ptr;
         }
         if (pe.key == -1) {
-            return guard.is_valid() ? pe.child->leaf_find(key) : leaf_find(key);
+            return pe.child->leaf_find(key);
         }
         if (pe.key == -2) {
             fan2Leaf *child = pe.fan2child;
-            if (guard.is_valid()) {
-                if (child->k1 == key) {
-                    return child->p1;
-                }
-                if (child->k2 == key) {
-                    return child->p2;
-                }
-                return -1;
-            } else {
-                return leaf_find(key); // Retry if invalid
+            if (child->k1 == key) {
+                return child->p1;
             }
+            if (child->k2 == key) {
+                return child->p2;
+            }
+            return -1;
         }
         return -1;
     }
 
     inline int range_query_from(const keyType &k1, recordPtr *results) const {
-        int j = 0;
-        int pred = LR_PRED(a, b, k1, fanout);
-        dilaxPairEntry &first_pe = pe_data[pred];
-        if (first_pe.key == -1) {
-            j = first_pe.child->range_query_from(k1, results);
-        } else if (first_pe.key == -2) {
-            fan2Leaf *fan2child = first_pe.fan2child;
-            keyType _k1 = fan2child->k1;
-            keyType _k2 = fan2child->k2;
-            if (_k1 >= k1) {
-                results[j++] = fan2child->p1;
-                results[j++] = fan2child->p2;
-            } else if (_k2 >= k1) {
-                results[j++] = fan2child->p2;
-            }
-        } else if (first_pe.key >= k1) {
-            results[j++] = first_pe.ptr;
-        }
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int j = 0;
+         int pred = LR_PRED(a, b, k1, fanout);
+         dilaxPairEntry &first_pe = pe_data[pred];
+         if (first_pe.key == -1) {
+             j = first_pe.child->range_query_from(k1, results);
+         } else if (first_pe.key == -2) {
+             fan2Leaf *fan2child = first_pe.fan2child;
+             keyType _k1 = fan2child->k1;
+             keyType _k2 = fan2child->k2;
+             if (_k1 >= k1) {
+                 results[j++] = fan2child->p1;
+                 results[j++] = fan2child->p2;
+             } else if (_k2 >= k1) {
+                 results[j++] = fan2child->p2;
+             }
+         } else if (first_pe.key >= k1) {
+             results[j++] = first_pe.ptr;
+         }
 
-        for(int i = pred + 1; i < fanout; ++i) {
-            dilaxPairEntry &pe = pe_data[i];
-            if (pe.key >= 0) {
-                results[j++] = pe.ptr;
-            } else if (pe.key == -1) {
-                pe.child->collect_all_ptrs(results+j);
-                j += pe.child->num_nonempty;
-            } else if (pe.key == -2) {
-                fan2Leaf *fan2child = pe.fan2child;
-                results[j++] = fan2child->p1;
-                results[j++] = fan2child->p2;
-            }
-        }
+         for(int i = pred + 1; i < fanout; ++i) {
+             dilaxPairEntry &pe = pe_data[i];
+             if (pe.key >= 0) {
+                 results[j++] = pe.ptr;
+             } else if (pe.key == -1) {
+                 pe.child->collect_all_ptrs(results+j);
+                 j += pe.child->num_nonempty;
+             } else if (pe.key == -2) {
+                 fan2Leaf *fan2child = pe.fan2child;
+                 results[j++] = fan2child->p1;
+                 results[j++] = fan2child->p2;
+             }
+         }
 
-        return j;
+         return j;
     }
 
     inline int range_query_to(const keyType &k2, recordPtr *results) const {
-        int j = 0;
-        int pred = LR_PRED(a, b, k2, fanout);
-        for(int i = 0; i < pred; ++i) {
-            dilaxPairEntry &pe = pe_data[i];
-            if (pe.key >= 0) {
-                results[j++] = pe.ptr;
-            } else if (pe.key == -1) {
-                pe.child->collect_all_ptrs(results+j);
-                j += pe.child->num_nonempty;
-            } else if (pe.key == -2) {
-                fan2Leaf *fan2child = pe.fan2child;
-                results[j++] = fan2child->p1;
-                results[j++] = fan2child->p2;
-            }
-        }
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int j = 0;
+         int pred = LR_PRED(a, b, k2, fanout);
+         for(int i = 0; i < pred; ++i) {
+             dilaxPairEntry &pe = pe_data[i];
+             if (pe.key >= 0) {
+                 results[j++] = pe.ptr;
+             } else if (pe.key == -1) {
+                 pe.child->collect_all_ptrs(results+j);
+                 j += pe.child->num_nonempty;
+             } else if (pe.key == -2) {
+                 fan2Leaf *fan2child = pe.fan2child;
+                 results[j++] = fan2child->p1;
+                 results[j++] = fan2child->p2;
+             }
+         }
 
-        dilaxPairEntry &pe = pe_data[pred];
-        if (pe.key == -1) {
-            j += pe.child->range_query_to(k2, results+j);
-        } else if (pe.key == -2) {
-            fan2Leaf *fan2child = pe.fan2child;
-            keyType _k1 = fan2child->k1;
-            keyType _k2 = fan2child->k2;
-            if (_k2 < k2) {
-                results[j++] = fan2child->p1;
-                results[j++] = fan2child->p2;
-            } else if (_k1 < k2) {
-                results[j++] = fan2child->p1;
-            }
-        } else if (pe.key < k2) {
-            results[j++] = pe.ptr;
-        }
-        return j;
+         dilaxPairEntry &pe = pe_data[pred];
+         if (pe.key == -1) {
+             j += pe.child->range_query_to(k2, results+j);
+         } else if (pe.key == -2) {
+             fan2Leaf *fan2child = pe.fan2child;
+             keyType _k1 = fan2child->k1;
+             keyType _k2 = fan2child->k2;
+             if (_k2 < k2) {
+                 results[j++] = fan2child->p1;
+                 results[j++] = fan2child->p2;
+             } else if (_k1 < k2) {
+                 results[j++] = fan2child->p1;
+             }
+         } else if (pe.key < k2) {
+             results[j++] = pe.ptr;
+         }
+         return j;
     }
 
 
     inline void collect_all_ptrs(recordPtr *results) const{
-        // Simplified sequential version for better cache performance
-        int j = 0;
-        for(int i = 0; i < fanout; ++i) {
-            dilaxPairEntry &pe = pe_data[i];
-            if (pe.key >= 0) {
-                results[j++] = pe.ptr;
-            } else if (pe.key == -1) {
-                pe.child->collect_all_ptrs(results+j);
-                j += pe.child->num_nonempty;
-            } else if (pe.key == -2) {
-                fan2Leaf *fan2child = pe.fan2child;
-                results[j++] = fan2child->p1;
-                results[j++] = fan2child->p2;
-            }
-        }
-    }
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int j = 0;
+         for(int i = 0; i < fanout; ++i) {
+             dilaxPairEntry &pe = pe_data[i];
+             if (pe.key >= 0) {
+                 results[j++] = pe.ptr;
+             } else if (pe.key == -1) {
+                 pe.child->collect_all_ptrs(results+j);
+                 j += pe.child->num_nonempty;
+             } else if (pe.key == -2) {
+                 fan2Leaf *fan2child = pe.fan2child;
+                 results[j++] = fan2child->p1;
+                 results[j++] = fan2child->p2;
+             }
+         }
+     }
 
 
     inline int range_query(const keyType &k1, const keyType &k2, recordPtr *results) const {
-        int pred1 = LR_PRED(a, b, k1, fanout);
-        int pred2 = LR_PRED(a, b, k2, fanout);
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int pred1 = LR_PRED(a, b, k1, fanout);
+         int pred2 = LR_PRED(a, b, k2, fanout);
 
-        if (pred1 == pred2) {
-            dilaxPairEntry &pe = pe_data[pred1];
-            if (pe.key == -1) {
-                return pe.child->range_query(k1, k2, results);
-            } else if (pe.key == -2) {
-                int n = 0;
-                fan2Leaf *leaf = pe.fan2child;
-                keyType _k1 = leaf->k1;
-                keyType _k2 = leaf->k2;
-                if (_k1 >= k1 && _k1 < k2) {
-                    results[n++] = leaf->p1;
-                }
-                if (_k2 >= k1 && _k2 < k2) {
-                    results[n++] = leaf->p2;
-                }
-                return n;
-            } else if (pe.key >= k1 && pe.key < k2) {
-                results[0] = pe.ptr;
-                return 1;
-            }
-        } else { // pred1 < pred2
+         if (pred1 == pred2) {
+             dilaxPairEntry &pe = pe_data[pred1];
+             if (pe.key == -1) {
+                 return pe.child->range_query(k1, k2, results);
+             } else if (pe.key == -2) {
+                 int n = 0;
+                 fan2Leaf *leaf = pe.fan2child;
+                 keyType _k1 = leaf->k1;
+                 keyType _k2 = leaf->k2;
+                 if (_k1 >= k1 && _k1 < k2) {
+                     results[n++] = leaf->p1;
+                 }
+                 if (_k2 >= k1 && _k2 < k2) {
+                     results[n++] = leaf->p2;
+                 }
+                 return n;
+             } else if (pe.key >= k1 && pe.key < k2) {
+                 results[0] = pe.ptr;
+                 return 1;
+             }
+         } else { // pred1 < pred2
 
-            dilaxPairEntry &first_pe = pe_data[pred1];
-            int n = 0;
-            if (first_pe.key == -1) {
-                n = first_pe.child->range_query_from(k1, results);
-            } else if (first_pe.key == -2) {
-                fan2Leaf *leaf = first_pe.fan2child;
-                keyType _k1 = leaf->k1;
-                keyType _k2 = leaf->k2;
-                if (_k1 >= k1) {
-                    results[0] = leaf->p1;
-                    results[1] = leaf->p2;
-                    n = 2;
-                } else if (_k2 >= k1) {
-                    results[1] = leaf->p2;
-                    n = 1;
-                }
-            } else if (first_pe.key >= k1) {
-                results[0] = first_pe.ptr;
-                n = 1;
-            }
+             dilaxPairEntry &first_pe = pe_data[pred1];
+             int n = 0;
+             if (first_pe.key == -1) {
+                 n = first_pe.child->range_query_from(k1, results);
+             } else if (first_pe.key == -2) {
+                 fan2Leaf *leaf = first_pe.fan2child;
+                 keyType _k1 = leaf->k1;
+                 keyType _k2 = leaf->k2;
+                 if (_k1 >= k1) {
+                     results[0] = leaf->p1;
+                     results[1] = leaf->p2;
+                     n = 2;
+                 } else if (_k2 >= k1) {
+                     results[1] = leaf->p2;
+                     n = 1;
+                 }
+             } else if (first_pe.key >= k1) {
+                 results[0] = first_pe.ptr;
+                 n = 1;
+             }
 
-            for (int i = pred1 + 1; i < pred2; ++i) {
-                dilaxPairEntry &pe = pe_data[i];
-                if (pe.key == -1) {
-                    pe.child->collect_all_ptrs(results+n);
-                    n += pe.child->num_nonempty;
-                } else if (pe.key == -2) {
-                    fan2Leaf *leaf = pe.fan2child;
-                    results[n++] = leaf->p1;
-                    results[n++] = leaf->p2;
-                } else if (pe.key >= k1 && pe.key < k2) {
-                    results[n++] = pe.ptr;
-                }
-            }
+             for (int i = pred1 + 1; i < pred2; ++i) {
+                 dilaxPairEntry &pe = pe_data[i];
+                 if (pe.key == -1) {
+                     pe.child->collect_all_ptrs(results+n);
+                     n += pe.child->num_nonempty;
+                 } else if (pe.key == -2) {
+                     fan2Leaf *leaf = pe.fan2child;
+                     results[n++] = leaf->p1;
+                     results[n++] = leaf->p2;
+                 } else if (pe.key >= k1 && pe.key < k2) {
+                     results[n++] = pe.ptr;
+                 }
+             }
 
-            dilaxPairEntry &final_pe = pe_data[pred2];
-            if (final_pe.key == -1) {
-                n += final_pe.child->range_query_to(k2, results+n);
-            } else if (final_pe.key == -2) {
-                fan2Leaf *leaf = final_pe.fan2child;
-                keyType _k1 = leaf->k1;
-                keyType _k2 = leaf->k2;
-                if (_k2 < k2) {
-                    results[n++] = leaf->p1;
-                    results[n++] = leaf->p2;
-                } else if (_k1 < k2) {
-                    results[n++] = leaf->p1;
-                }
+             dilaxPairEntry &final_pe = pe_data[pred2];
+             if (final_pe.key == -1) {
+                 n += final_pe.child->range_query_to(k2, results+n);
+             } else if (final_pe.key == -2) {
+                 fan2Leaf *leaf = final_pe.fan2child;
+                 keyType _k1 = leaf->k1;
+                 keyType _k2 = leaf->k2;
+                 if (_k2 < k2) {
+                     results[n++] = leaf->p1;
+                     results[n++] = leaf->p2;
+                 } else if (_k1 < k2) {
+                     results[n++] = leaf->p1;
+                 }
 
-            } else if (final_pe.key < k2) {
-                results[n++] = final_pe.ptr;
-            }
-            return n;
-        }
+             } else if (final_pe.key < k2) {
+                 results[n++] = final_pe.ptr;
+             }
+             return n;
+         }
     }
 
 
     inline dilaxNode* find_child(const keyType &key) {
-        int i = LR_PRED(a, b, key, fanout);
-        dilaxPairEntry &pe = pe_data[i];
-        return pe.child;
-    }
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         int i = LR_PRED(a, b, key, fanout);
+         return pe_data[i].child;
+     }
 
 
     inline bool if_retrain() { return (!is_internal()) && (total_n_travs * last_nn >= ((last_total_n_travs * num_nonempty) << 1) ); }
 
-    inline void put_three_keys(const keyType &k0, const recordPtr &p0, const keyType &k1, const recordPtr &p1, const keyType &k2, const recordPtr &p2) {
-        double offset = fanout / 3.0;
-        keyType s = MIN_KEY(k1 - k0, k2 - k1);
-        b = offset / s;
-        a = 0.5 + offset - b * k1;
-        int pos0 = LR_PRED(a, b, k0, fanout);
-        int pos1 = LR_PRED(a, b, k1, fanout);
-        int pos2 = LR_PRED(a, b, k2, fanout);
-        pe_data[pos0].assign(k0, p0);
-        pe_data[pos1].assign(k1, p1);
-        pe_data[pos2].assign(k2, p2);
-        assert(pos0 < pos1 && pos1 < pos2);
-        total_n_travs = 3;
-        avg_n_travs_since_last_dist = 1;
-    }
+     inline void put_three_keys(const keyType &k0, const recordPtr &p0, const keyType &k1, const recordPtr &p1, const keyType &k2, const recordPtr &p2) {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         double offset = fanout / 3.0;
+         keyType s = MIN_KEY(k1 - k0, k2 - k1);
+         b = offset / s;
+         a = 0.5 + offset - b * k1;
+         int pos0 = LR_PRED(a, b, k0, fanout);
+         int pos1 = LR_PRED(a, b, k1, fanout);
+         int pos2 = LR_PRED(a, b, k2, fanout);
+         pe_data[pos0].assign(k0, p0);
+         pe_data[pos1].assign(k1, p1);
+         pe_data[pos2].assign(k2, p2);
+         assert(pos0 < pos1 && pos1 < pos2);
+         total_n_travs = 3;
+         avg_n_travs_since_last_dist = 1;
+     }
 
-    inline void put_three_keys(const keyType *_keys, const recordPtr *_ptrs) {
-        keyType k0 = _keys[0];
-        keyType k1 = _keys[1];
-        keyType k2 = _keys[2];
-        double offset = fanout / 3.0;
-        keyType s = MIN_KEY(k1 - k0, k2 - k1);
-        b = offset / s;
-        a = 0.5 + offset - b * k1;
-        int pos0 = LR_PRED(a, b, k0, fanout);
-        int pos1 = LR_PRED(a, b, k1, fanout);
-        int pos2 = LR_PRED(a, b, k2, fanout);
+     inline void put_three_keys(const keyType *_keys, const recordPtr *_ptrs) {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         keyType k0 = _keys[0];
+         keyType k1 = _keys[1];
+         keyType k2 = _keys[2];
+         double offset = fanout / 3.0;
+         keyType s = MIN_KEY(k1 - k0, k2 - k1);
+         b = offset / s;
+         a = 0.5 + offset - b * k1;
+         int pos0 = LR_PRED(a, b, k0, fanout);
+         int pos1 = LR_PRED(a, b, k1, fanout);
+         int pos2 = LR_PRED(a, b, k2, fanout);
 
-        pe_data[pos0].assign(k0, _ptrs[0]);
-        pe_data[pos1].assign(k1, _ptrs[1]);
-        pe_data[pos2].assign(k2, _ptrs[2]);
-        assert(pos0 < pos1 && pos1 < pos2);
-        total_n_travs = 3;
-        avg_n_travs_since_last_dist = 1;
-    }
+         pe_data[pos0].assign(k0, _ptrs[0]);
+         pe_data[pos1].assign(k1, _ptrs[1]);
+         pe_data[pos2].assign(k2, _ptrs[2]);
+         assert(pos0 < pos1 && pos1 < pos2);
+         total_n_travs = 3;
+         avg_n_travs_since_last_dist = 1;
+     }
 
-    void num_nonempty_stats(int &n0, int &n1, int &n2, int &n, long &total_fan, long &n_empty_slos) {
-        total_fan += fanout;
-        if (num_nonempty == 0) {
-            n0 = n = 1;
-            n1 = n2 = 0;
-            return;
-        } else if (num_nonempty == 1) {
-            n0 = n2 = 0;
-            n1 = n = 1;
-        } else if (num_nonempty == 2) {
-            n0 = n1 = 0;
-            n2 = n = 1;
-        } else {
-            n = 1;
-            n0 = n1 = n2 = 0;
-        }
-        for (int i = 0; i < fanout; ++i) {
-            int cn0 = 0;
-            int cn1 = 0;
-            int cn2 = 0;
-            int cn = 0;
-            long c_total_fan = 0;
-            long c_n_empty_slots = 0;
-            dilaxPairEntry &pe = pe_data[i];
-            if (pe.key == -1) {
-                pe.child->num_nonempty_stats(cn0, cn1, cn2, cn, c_total_fan, c_n_empty_slots);
-            }
-            if (pe.key < -2) {
-                ++n_empty_slos;
-            }
-            n0 += cn0;
-            n1 += cn1;
-            n2 += cn2;
-            n += cn;
-            total_fan += c_total_fan;
-            n_empty_slos += c_n_empty_slots;
-        }
-    }
+     void num_nonempty_stats(int &n0, int &n1, int &n2, int &n, long &total_fan, long &n_empty_slos) {
+        std::shared_lock<std::shared_mutex> __lock(node_mutex);
+         total_fan += fanout;
+         if (num_nonempty == 0) {
+             n0 = n = 1;
+             n1 = n2 = 0;
+             return;
+         } else if (num_nonempty == 1) {
+             n0 = n2 = 0;
+             n1 = n = 1;
+         } else if (num_nonempty == 2) {
+             n0 = n1 = 0;
+             n2 = n = 1;
+         } else {
+             n = 1;
+             n0 = n1 = n2 = 0;
+         }
+         for (int i = 0; i < fanout; ++i) {
+             int cn0 = 0;
+             int cn1 = 0;
+             int cn2 = 0;
+             int cn = 0;
+             long c_total_fan = 0;
+             long c_n_empty_slots = 0;
+             dilaxPairEntry &pe = pe_data[i];
+             if (pe.key == -1) {
+                 pe.child->num_nonempty_stats(cn0, cn1, cn2, cn, c_total_fan, c_n_empty_slots);
+             }
+             if (pe.key < -2) {
+                 ++n_empty_slos;
+             }
+             n0 += cn0;
+             n1 += cn1;
+             n2 += cn2;
+             n += cn;
+             total_fan += c_total_fan;
+             n_empty_slos += c_n_empty_slots;
+         }
+     }
 
 
     ~dilaxNode(){
-        if (pe_data) {
-            if (fanout > 0) {
-                for (int i = 0; i < fanout; ++i) {
-                    if (pe_data[i].key == -1) {
-                        dilaxNode *child = pe_data[i].child;
-                        delete child;
-                    }
-                }
-            }
-            delete [] pe_data;
-            pe_data = NULL;
-        }
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         if (pe_data) {
+             if (fanout > 0) {
+                 for (int i = 0; i < fanout; ++i) {
+                     if (pe_data[i].key == -1) {
+                         dilaxNode *child = pe_data[i].child;
+                         delete child;
+                     }
+                 }
+             }
+             delete [] pe_data;
+             pe_data = NULL;
+         }
     }
 
 
@@ -806,40 +673,136 @@ struct dilaxNode{
 
     void bulk_loading(const keyType *keys, const recordPtr *ptrs, bool print) {
         if (num_nonempty == 0) {
-            fanout = 2;
-            total_n_travs = 0;
-            return;
-        } else {
-            init();
+             fanout = 2;
+             total_n_travs = 0;
+             return;
+         } else {
+             init();
 
-            assert(fanout > 0);
-            if (num_nonempty == 1) {
-//                pe_data = new dilaxPairEntry[fanout];
+             assert(fanout > 0);
+             if (num_nonempty == 1) {
+//                pe_data = new pairEntry[fanout];
                 a = b = 0;
                 pe_data[0].assign(keys[0], ptrs[0]);
                 total_n_travs = 1;
                 return;
-            } else if (num_nonempty == 2) {
-                b = 1.0 / (keys[1] - keys[0]);
-                a = 0.5 - b * keys[0];
-                pe_data[0].assign(keys[0], ptrs[0]);
-                pe_data[1].assign(keys[1], ptrs[1]);
-                total_n_travs = 2;
-                return;
-            } else if (num_nonempty == 3) {
-                put_three_keys(keys, ptrs);
-                return;
-            }
-        }
-        distribute_data(keys, ptrs, print);
-    }
+             } else if (num_nonempty == 2) {
+                 b = 1.0 / (keys[1] - keys[0]);
+                 a = 0.5 - b * keys[0];
+                 pe_data[0].assign(keys[0], ptrs[0]);
+                 pe_data[1].assign(keys[1], ptrs[1]);
+                 total_n_travs = 2;
+                 return;
+             } else if (num_nonempty == 3) {
+                 put_three_keys(keys, ptrs);
+                 return;
+             }
+         }
+         distribute_data(keys, ptrs, print);
+     }
 
     void distribute_data(const keyType *keys, const recordPtr *ptrs, bool print=false) {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         assert(num_nonempty > 3);
+
+         total_n_travs = 0;
+         dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, false);
+//        linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
+         int last_k_id = 0;
+         keyType last_key = keys[0];
+         int pos = -1;
+         int last_pos = LR_PRED(a, b, last_key, fanout);
+
+         keyType final_key = keys[num_nonempty - 1];
+//    int final_pos = LR_PRED(a, b, final_key, fanout);
+         if (b < 0 || last_pos == LR_PRED(a, b, final_key, fanout)) {
+             dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
+             last_pos = LR_PRED(a, b, last_key, fanout);
+             int final_pos = LR_PRED(a, b, final_key, fanout);
+             assert(last_pos != final_pos);
+         }
+
+         assert(b >= 0);
+
+         for (int k_id = 1; k_id < num_nonempty; ++k_id) {
+             keyType key = keys[k_id];
+             assert (key != last_key);
+             pos = LR_PRED(a, b, key, fanout);
+
+             assert(pos >= last_pos);
+
+             if (pos != last_pos) {
+                 if (k_id == last_k_id + 1) {
+                     pe_data[last_pos].assign(last_key, ptrs[last_k_id]);
+                     ++total_n_travs;
+                 } else { // need to create a new node
+                     int n_keys_this_child = k_id - last_k_id;
+                     if (n_keys_this_child == 3) {
+                         dilaxNode *child = new dilaxNode(false);
+                         child->init(3);
+                         child->put_three_keys(keys + last_k_id, ptrs + last_k_id);
+                         pe_data[last_pos].setChild(child);
+                         total_n_travs += 6;
+                     }
+                     else if (n_keys_this_child == 2) {
+                         fan2Leaf *fan2child = new fan2Leaf(keys[last_k_id], ptrs[last_k_id], keys[last_k_id + 1], ptrs[last_k_id + 1]);
+                         pe_data[last_pos].setFan2Child(fan2child);
+                         total_n_travs += 4;
+                     }
+                     else {
+                         dilaxNode *child = new dilaxNode(false);
+                         child->init(n_keys_this_child);
+                         child->distribute_data(keys + last_k_id, ptrs + last_k_id);
+                         pe_data[last_pos].setChild(child);
+                         total_n_travs += n_keys_this_child + child->total_n_travs;
+                     }
+                 }
+                 last_key = key;
+                 last_pos = pos;
+                 last_k_id = k_id;
+             }
+         }
+
+         assert(last_k_id != 0);
+         assert(pos >= last_pos);
+         if (last_k_id == num_nonempty - 1) {
+             ++total_n_travs;
+             pe_data[pos].assign(keys[num_nonempty - 1], ptrs[num_nonempty - 1]);
+         } else {
+             int n_keys_this_child = num_nonempty - last_k_id;
+             if (n_keys_this_child == 3) {
+
+                 dilaxNode *child = new dilaxNode(false);
+                 child->init(3);
+                 child->put_three_keys(keys + last_k_id, ptrs + last_k_id);
+                 pe_data[last_pos].setChild(child);
+                 total_n_travs += 6;
+             }
+             else if (n_keys_this_child == 2) {
+                 fan2Leaf *fan2child = new fan2Leaf(keys[last_k_id], ptrs[last_k_id], keys[last_k_id + 1], ptrs[last_k_id + 1]);
+                 pe_data[last_pos].setFan2Child(fan2child);
+                 total_n_travs += 4;
+             }
+
+             else {
+                 dilaxNode *child = new dilaxNode(false);
+                 child->init(n_keys_this_child);
+                 child->distribute_data(keys + last_k_id, ptrs + last_k_id);
+                 pe_data[last_pos].setChild(child);
+                 total_n_travs += n_keys_this_child + child->total_n_travs;
+             }
+         }
+
+         last_total_n_travs = total_n_travs;
+         last_nn = num_nonempty;
+     }
+
+    // nolock variants - assume caller already holds node_mutex
+    void distribute_data_nolock(const keyType *keys, const recordPtr *ptrs, bool print=false) {
         assert(num_nonempty > 3);
 
         total_n_travs = 0;
         dilax::linearReg_w_expanding(keys, a, b, num_nonempty, fanout, false);
-//        linearReg_w_expanding(keys, a, b, num_nonempty, fanout, true);
         int last_k_id = 0;
         keyType last_key = keys[0];
         int pos = -1;
@@ -866,7 +829,7 @@ struct dilaxNode{
                 if (k_id == last_k_id + 1) {
                     pe_data[last_pos].assign(last_key, ptrs[last_k_id]);
                     ++total_n_travs;
-                } else { // need to create a new node
+                } else {
                     int n_keys_this_child = k_id - last_k_id;
                     if (n_keys_this_child == 3) {
                         dilaxNode *child = new dilaxNode(false);
@@ -883,7 +846,7 @@ struct dilaxNode{
                     else {
                         dilaxNode *child = new dilaxNode(false);
                         child->init(n_keys_this_child);
-                        child->distribute_data(keys + last_k_id, ptrs + last_k_id);
+                        child->distribute_data_nolock(keys + last_k_id, ptrs + last_k_id);
                         pe_data[last_pos].setChild(child);
                         total_n_travs += n_keys_this_child + child->total_n_travs;
                     }
@@ -918,7 +881,7 @@ struct dilaxNode{
             else {
                 dilaxNode *child = new dilaxNode(false);
                 child->init(n_keys_this_child);
-                child->distribute_data(keys + last_k_id, ptrs + last_k_id);
+                child->distribute_data_nolock(keys + last_k_id, ptrs + last_k_id);
                 pe_data[last_pos].setChild(child);
                 total_n_travs += n_keys_this_child + child->total_n_travs;
             }
@@ -928,26 +891,37 @@ struct dilaxNode{
         last_nn = num_nonempty;
     }
 
-    void cal_avg_n_travs() {
-        if (!is_internal()) {
-            if (num_nonempty <= 2) {
-                avg_n_travs_since_last_dist = 1;
-                return;
-            }
-            avg_n_travs_since_last_dist = 1.0 * total_n_travs / num_nonempty;
-        }
-        for (int i = 0; i < fanout; ++i) {
+    void collect_and_clear_nolock(keyType *keys, recordPtr *ptrs) {
+        int j = 0;
+        for(int i = 0; i < fanout; ++i) {
             dilaxPairEntry &pe = pe_data[i];
-            if (pe.key == -1) {
-                pe.child->cal_avg_n_travs();
+            if (pe.key >= 0) {
+                keys[j] = pe.key;
+                ptrs[j++] = pe.ptr;
+            } else if (pe.key == -1) {
+                dilaxNode *child = pe.child;
+                child->collect_and_clear_nolock(keys+j, ptrs+j);
+                j += child->num_nonempty;
+                delete child;
+            }
+            else if (pe.key == -2) {
+                fan2Leaf *fan2child = pe.fan2child;
+                keys[j] = fan2child->k1;
+                ptrs[j++] = fan2child->p1;
+                keys[j] = fan2child->k2;
+                ptrs[j++] = fan2child->p2;
             }
         }
+        delete[] pe_data;
+        pe_data = NULL;
+        assert(j == num_nonempty);
     }
 
 
     inline bool insert(const keyType &_key, const recordPtr &_ptr) {
-        int pred = LR_PRED(a, b, _key, fanout);
-        dilaxPairEntry &pe = pe_data[pred];
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         int pred = LR_PRED(a, b, _key, fanout);
+         dilaxPairEntry &pe = pe_data[pred];
 //    if (print) {
 //        cout << "_key = " << _key << ", pe.key = " << pe.key << ", fanout = " << fanout << ", pred = " << pred << ", num_nonempty = " << num_nonempty << endl;
 //    }
@@ -969,12 +943,11 @@ struct dilaxNode{
                 ++total_n_travs;
                 total_n_travs += (child->total_n_travs - child_last_total_n_travs);
                 if (if_retrain()) {
-                    dilax_auxiliary::ensure_thread_aux_vars();  // Ensure thread-local vars are initialized
-                    collect_and_clear(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
+                    collect_and_clear_nolock(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
                     inc_n_adjust();
                     init();
-                    distribute_data(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
-                    dilax_num_adjust_stats.fetch_add(1, std::memory_order_relaxed);
+                    distribute_data_nolock(dilax_auxiliary::retrain_keys, dilax_auxiliary::retrain_ptrs);
+                    ++dilax_num_adjust_stats;
                 }
 
                 if (get_n_adjust() >= 4)  {
@@ -1037,9 +1010,10 @@ struct dilaxNode{
 
 
     inline int erase(const keyType &_key) {
-        int pred = LR_PRED(a, b, _key, fanout);
-        dilaxPairEntry &pe = pe_data[pred];
-        if (pe.key == _key) {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         int pred = LR_PRED(a, b, _key, fanout);
+         dilaxPairEntry &pe = pe_data[pred];
+         if (pe.key == _key) {
             pe.setNull();
             --num_nonempty;
             --total_n_travs;
@@ -1084,9 +1058,10 @@ struct dilaxNode{
         }
     }
     inline int erase_and_get_ptr(const keyType &_key, recordPtr &ptr) {
-        int pred = LR_PRED(a, b, _key, fanout);
-        dilaxPairEntry &pe = pe_data[pred];
-        if (pe.key == _key) {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         int pred = LR_PRED(a, b, _key, fanout);
+         dilaxPairEntry &pe = pe_data[pred];
+         if (pe.key == _key) {
             ptr = pe.ptr;
             pe.setNull();
             --num_nonempty;
@@ -1136,30 +1111,31 @@ struct dilaxNode{
 
 
     void collect_and_clear(keyType *keys, recordPtr *ptrs) {
-        int j = 0;
-        for(int i = 0; i < fanout; ++i) {
-            dilaxPairEntry &pe = pe_data[i];
-            if (pe.key >= 0) {
-                keys[j] = pe.key;
-                ptrs[j++] = pe.ptr;
-            } else if (pe.key == -1) {
-                dilaxNode *child = pe.child;
-                child->collect_and_clear(keys+j, ptrs+j);
-                j += child->num_nonempty;
-                delete child;
-            }
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+         int j = 0;
+         for(int i = 0; i < fanout; ++i) {
+             dilaxPairEntry &pe = pe_data[i];
+             if (pe.key >= 0) {
+                 keys[j] = pe.key;
+                 ptrs[j++] = pe.ptr;
+             } else if (pe.key == -1) {
+                 dilaxNode *child = pe.child;
+                 child->collect_and_clear(keys+j, ptrs+j);
+                 j += child->num_nonempty;
+                 delete child;
+             }
             else if (pe.key == -2) {
-                fan2Leaf *fan2child = pe.fan2child;
-                keys[j] = fan2child->k1;
-                ptrs[j++] = fan2child->p1;
-                keys[j] = fan2child->k2;
-                ptrs[j++] = fan2child->p2;
-            }
-        }
-        delete[] pe_data;
-        pe_data = NULL;
-        assert(j == num_nonempty);
-    }
+                 fan2Leaf *fan2child = pe.fan2child;
+                 keys[j] = fan2child->k1;
+                 ptrs[j++] = fan2child->p1;
+                 keys[j] = fan2child->k2;
+                 ptrs[j++] = fan2child->p2;
+             }
+         }
+         delete[] pe_data;
+         pe_data = NULL;
+         assert(j == num_nonempty);
+     }
 
     void collect_all_keys(keyType *keys) {
         assert(b >= 0);
@@ -1198,6 +1174,24 @@ struct dilaxNode{
             }
         }
         assert(j == num_nonempty);
+    }
+
+    // compute average traversals per key and recurse
+    void cal_avg_n_travs() {
+        std::unique_lock<std::shared_mutex> __lock(node_mutex);
+        if (!is_internal()) {
+            if (num_nonempty <= 2) {
+                avg_n_travs_since_last_dist = 1;
+            } else {
+                avg_n_travs_since_last_dist = 1.0 * total_n_travs / num_nonempty;
+            }
+        }
+        for (int i = 0; i < fanout; ++i) {
+            dilaxPairEntry &pe = pe_data[i];
+            if (pe.key == -1) {
+                pe.child->cal_avg_n_travs();
+            }
+        }
     }
 
 };
