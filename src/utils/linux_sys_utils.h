@@ -3,6 +3,7 @@
 #include <linux/perf_event.h>
 #include <asm/unistd.h>
 #include <iostream>
+#include <functional>
 
 #ifndef UTILS_LINUX_SYS_UTILS_H
 #define UTILS_LINUX_SYS_UTILS_H
