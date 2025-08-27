@@ -3,6 +3,12 @@
 // Define EBR static members (to avoid multiple definitions)
 thread_local uint64_t EBR::localEpoch = 0;
 std::atomic<uint64_t> EBR::globalEpoch{0};
+
+// Fine-grained EBR: Thread-local deletion queues (SALI-style)
+thread_local std::vector<void*> EBR::threadLocalDeletes[3];
+thread_local std::vector<int> EBR::threadLocalDeleteTypes[3];
+
+// Structure-level EBR: Global deletion queues (original DILAX)
 std::atomic<void*> EBR::pendingDeletes[3] = {nullptr, nullptr, nullptr};
 std::atomic<int> EBR::deleteTypes[3] = {0, 0, 0};
 std::mutex EBR::deleteMutex;

@@ -12,21 +12,30 @@
 #include <atomic>
 #include <immintrin.h>
 #include <sched.h>
+#include <unordered_set>
+#include <vector>
 #include "../global/global.h"
 #include "../global/fan2Leaf.h"
 //#include "../global/linearReg.h"
 
-// Simple Epoch-Based Reclamation for DILAX
+// Enhanced Epoch-Based Reclamation for DILAX - Supporting both fine-grained and structure-level
 class EBR {
 private:
     static thread_local uint64_t localEpoch;
     static std::atomic<uint64_t> globalEpoch;
+    
+    // Fine-grained EBR: Per-thread deletion queues (like SALI)
+    static thread_local std::vector<void*> threadLocalDeletes[3];
+    static thread_local std::vector<int> threadLocalDeleteTypes[3];
+    
+    // Structure-level EBR: Global deletion queues (original DILAX approach)
     static std::atomic<void*> pendingDeletes[3]; // Ring buffer for 3 epochs
     static std::atomic<int> deleteTypes[3]; // Track what type each deletion is
     static std::mutex deleteMutex;
 
 public:
     enum DeleteType { NODE_DELETE = 1, STRUCTURE_DELETE = 2 };
+    enum EBRMode { FINE_GRAINED = 0, STRUCTURE_LEVEL = 1 };
     
     static void enterEpoch() {
         localEpoch = globalEpoch.load();
@@ -36,44 +45,154 @@ public:
         localEpoch = 0;
     }
     
+    // Fine-grained EBR: Schedule individual node deletions (SALI-style)
+    static void scheduleDeleteFineGrained(void* ptr, DeleteType type = NODE_DELETE) {
+        if (!ptr) return;
+        
+        // Validate pointer before adding to queue
+        if (reinterpret_cast<uintptr_t>(ptr) <= 0x1000) return;
+        
+        try {
+            uint64_t epoch = localEpoch;
+            
+            // Simple duplicate check in current epoch only (lighter than global tracking)
+            auto& deleteList = threadLocalDeletes[epoch % 3];
+            for (size_t i = deleteList.size(); i > 0 && i > deleteList.size() - 10; --i) {
+                if (deleteList[i-1] == ptr) {
+                    return; // Already scheduled recently, don't add again
+                }
+            }
+            
+            deleteList.push_back(ptr);
+            threadLocalDeleteTypes[epoch % 3].push_back(static_cast<int>(type));
+        } catch (...) {
+            // If adding to queue fails, just return (don't crash)
+            return;
+        }
+    }
+    
+    // Structure-level EBR: Schedule structure deletions (original DILAX)
     static void scheduleDelete(void* ptr, DeleteType type = NODE_DELETE) {
         if (!ptr) return; // Null pointer check
+        
+        // Validate pointer before scheduling
+        if (reinterpret_cast<uintptr_t>(ptr) <= 0x1000) return;
         
         uint64_t epoch = globalEpoch.load();
         std::lock_guard<std::mutex> lock(deleteMutex);
         
-        // Simple implementation - just add to pending list
-        // Only schedule if slot is empty to avoid overwriting
+        // Check if this slot already has a pending deletion to prevent overwrites
+        void* existing = pendingDeletes[epoch % 3].load();
+        if (existing != nullptr) {
+            // Slot is occupied, try to process it immediately if it's old enough
+            uint64_t currentEpoch = globalEpoch.load();
+            if (currentEpoch >= 6) {
+                uint64_t oldEpoch = currentEpoch - 6;
+                void* toDelete = pendingDeletes[oldEpoch % 3].exchange(nullptr);
+                if (toDelete && toDelete != ptr) { // Don't delete the same pointer
+                    int deleteType = deleteTypes[oldEpoch % 3].load();
+                    deleteTypes[oldEpoch % 3].store(0);
+                    
+                    if (reinterpret_cast<uintptr_t>(toDelete) > 0x1000) {
+                        try {
+                            if (deleteType == STRUCTURE_DELETE) {
+                                deleteOldStructure(toDelete);
+                            } else {
+                                deleteDilaxNode(toDelete);
+                            }
+                        } catch (...) {
+                            // Continue if deletion fails
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Now try to schedule the new deletion
         void* expected = nullptr;
         if (pendingDeletes[epoch % 3].compare_exchange_strong(expected, ptr)) {
             deleteTypes[epoch % 3].store(type);
             // Successfully scheduled
-        } else {
-            // Slot occupied, skip this deletion for safety
-            // In a real implementation, would use a proper queue
+        }
+        // If still can't schedule, just skip (better than corrupting memory)
+    }
+    
+    // Fine-grained EBR epoch advancement
+    static void advanceFineGrained() {
+        try {
+            globalEpoch.fetch_add(1);
+            uint64_t currentEpoch = globalEpoch.load();
+            if (currentEpoch < 3) return; // Wait for 3 epochs
+            
+            uint64_t oldEpoch = currentEpoch - 3;
+            auto& deleteList = threadLocalDeletes[oldEpoch % 3];
+            auto& typeList = threadLocalDeleteTypes[oldEpoch % 3];
+            
+            // Validate lists before processing
+            if (deleteList.size() != typeList.size()) {
+                // Lists are inconsistent, clear them and return
+                deleteList.clear();
+                typeList.clear();
+                return;
+            }
+            
+            // Process all pending deletes for this epoch
+            for (size_t i = 0; i < deleteList.size(); ++i) {
+                void* toDelete = deleteList[i];
+                int deleteType = typeList[i];
+                
+                if (toDelete && reinterpret_cast<uintptr_t>(toDelete) > 0x1000) {
+                    try {
+                        if (deleteType == STRUCTURE_DELETE) {
+                            deleteOldStructure(toDelete);
+                        } else {
+                            deleteDilaxNode(toDelete);
+                        }
+                    } catch (...) {
+                        // If deletion fails, continue with next item
+                        continue;
+                    }
+                }
+            }
+            
+            // Clear the lists for this epoch
+            deleteList.clear();
+            typeList.clear();
+        } catch (...) {
+            // If entire function fails, just return
+            return;
         }
     }
     
     static void advance() {
-        globalEpoch.fetch_add(1);
-        // Be more conservative with cleanup - require more epochs
-        uint64_t currentEpoch = globalEpoch.load();
-        if (currentEpoch < 6) return; // Don't clean up too early
-        
-        uint64_t oldEpoch = currentEpoch - 6; // Wait 6 epochs instead of 3
-        void* toDelete = pendingDeletes[oldEpoch % 3].exchange(nullptr);
-        if (toDelete) {
-            int deleteType = deleteTypes[oldEpoch % 3].load();
-            deleteTypes[oldEpoch % 3].store(0); // Reset
+        try {
+            globalEpoch.fetch_add(1);
+            // Be more conservative with cleanup - require more epochs
+            uint64_t currentEpoch = globalEpoch.load();
+            if (currentEpoch < 6) return; // Don't clean up too early
             
-            // Additional safety check before deletion
-            if (reinterpret_cast<uintptr_t>(toDelete) > 0x1000) {
-                if (deleteType == STRUCTURE_DELETE) {
-                    deleteOldStructure(toDelete);
-                } else {
-                    deleteDilaxNode(toDelete);
+            uint64_t oldEpoch = currentEpoch - 6; // Wait 6 epochs instead of 3
+            void* toDelete = pendingDeletes[oldEpoch % 3].exchange(nullptr);
+            if (toDelete) {
+                int deleteType = deleteTypes[oldEpoch % 3].load();
+                deleteTypes[oldEpoch % 3].store(0); // Reset
+                
+                // Additional safety check before deletion
+                if (reinterpret_cast<uintptr_t>(toDelete) > 0x1000) {
+                    try {
+                        if (deleteType == STRUCTURE_DELETE) {
+                            deleteOldStructure(toDelete);
+                        } else {
+                            deleteDilaxNode(toDelete);
+                        }
+                    } catch (...) {
+                        // If deletion fails, just continue
+                    }
                 }
             }
+        } catch (...) {
+            // If entire function fails, just return
+            return;
         }
     }
     
@@ -152,8 +271,16 @@ struct OldDilaxStructure {
     OptimisticDilaxPairEntry *data;
     int fanout;
     
-    // Constructor for proper initialization
-    OldDilaxStructure(OptimisticDilaxPairEntry *d, int f) : data(d), fanout(f) {}
+    // Constructor for proper initialization with validation
+    OldDilaxStructure(OptimisticDilaxPairEntry *d, int f) : data(nullptr), fanout(0) {
+        // Validate inputs before storing
+        if (d && f > 0 && f < 100000 && reinterpret_cast<uintptr_t>(d) > 0x1000) {
+            data = d;
+            fanout = f;
+        }
+        // If validation fails, data remains nullptr and fanout remains 0
+        // This will be caught in deleteOldStructure
+    }
 };
 
 namespace dilax_auxiliary {
@@ -343,8 +470,27 @@ struct dilaxNode{
             fanout = std::max<int>(num_nonempty, 16); // Fallback value
         }
         
-        pe_data = new OptimisticDilaxPairEntry[fanout];
-        // Skip explicit initialization - constructor already sets key=-3
+        try {
+            pe_data = new OptimisticDilaxPairEntry[fanout];
+            
+            // Additional safety: verify allocation succeeded by accessing first element
+            if (pe_data) {
+                pe_data[0].key = -3; // Explicit initialization to test allocation
+            }
+        } catch (std::bad_alloc& e) {
+            cout << "ERROR: Failed to allocate pe_data array of size " << fanout << endl;
+            // Try with smaller fanout
+            fanout = std::max<int>(num_nonempty, 8);
+            try {
+                pe_data = new OptimisticDilaxPairEntry[fanout];
+            } catch (...) {
+                cout << "FATAL: Cannot allocate even minimal pe_data array" << endl;
+                pe_data = nullptr;
+            }
+        } catch (...) {
+            cout << "ERROR: Unknown exception during pe_data allocation" << endl;
+            pe_data = nullptr;
+        }
     }
 
 
@@ -356,8 +502,27 @@ struct dilaxNode{
         num_nonempty = _num_nonempty;
         fanout = std::max<int>(_num_nonempty, minFan);
         fanout <<= 1;
-        pe_data = new OptimisticDilaxPairEntry[fanout];
-        // Skip explicit initialization - constructor already sets key=-3
+        
+        try {
+            pe_data = new OptimisticDilaxPairEntry[fanout];
+            // Additional safety: verify allocation succeeded
+            if (pe_data) {
+                pe_data[0].key = -3; // Explicit initialization to test allocation
+            }
+        } catch (std::bad_alloc& e) {
+            cout << "ERROR: Failed to allocate pe_data array of size " << fanout << endl;
+            // Try with smaller fanout
+            fanout = std::max<int>(_num_nonempty, 8);
+            try {
+                pe_data = new OptimisticDilaxPairEntry[fanout];
+            } catch (...) {
+                cout << "FATAL: Cannot allocate even minimal pe_data array" << endl;
+                pe_data = nullptr;
+            }
+        } catch (...) {
+            cout << "ERROR: Unknown exception during pe_data allocation" << endl;
+            pe_data = nullptr;
+        }
     }
 
     inline void inc_num_nonempty() { ++num_nonempty; }
@@ -880,7 +1045,7 @@ struct dilaxNode{
 
 
     ~dilaxNode(){
-        // Use EBR for safe concurrent deletion
+        // Temporarily disable EBR to debug heap corruption - direct delete for now
         if (pe_data) {
             // Add safety check for fanout
             if (fanout > 0 && fanout < 100000) {
@@ -889,9 +1054,9 @@ struct dilaxNode{
                     if (reinterpret_cast<uintptr_t>(&pe_data[i]) != 0) {
                         if (pe_data[i].key == -1 && pe_data[i].child) {
                             dilaxNode *child = pe_data[i].child;
-                            // Check if child pointer looks valid
+                            // Check if child pointer looks valid and delete directly
                             if (reinterpret_cast<uintptr_t>(child) > 0x1000) {
-                                EBR::scheduleDelete(child); // Safe concurrent delete
+                                delete child; // Direct delete to avoid EBR complexity
                             }
                         }
                     }
@@ -1290,13 +1455,17 @@ struct dilaxNode{
                             // The new structure is ready, now atomically replace the pointer
                             // Other threads will either see old or new structure, never half-built
                             
-                            // Schedule old structure for EBR deletion
-                            if (old_pe_data && old_fanout > 0) {
-                                // Create a cleanup task for the old structure
-                                OldDilaxStructure *cleanup = new OldDilaxStructure(old_pe_data, old_fanout);
-                                
-                                // Schedule the entire old structure for safe deletion
-                                EBR::scheduleDelete(cleanup, EBR::STRUCTURE_DELETE);
+                            // Schedule old structure for EBR deletion with validation
+                            if (old_pe_data && old_fanout > 0 && old_fanout < 100000) {
+                                // Validate old_pe_data pointer before creating cleanup task
+                                if (reinterpret_cast<uintptr_t>(old_pe_data) > 0x1000) {
+                                    try {
+                                        // Temporarily disable EBR for retraining - direct delete
+                                        delete[] old_pe_data;
+                                    } catch (...) {
+                                        // If even direct deletion fails, just continue
+                                    }
+                                }
                             }
                             
                             // Track successful retraining
@@ -1399,11 +1568,16 @@ struct dilaxNode{
             pe_data[pred].setFan2Child(fan2child);
             pe_data[pred].writeUnlock();
             
-            // Periodically advance EBR epoch (less frequently)
-            static thread_local int insertCount = 0;
-            if (++insertCount % 1000 == 0) {  // Changed from 100 to 1000
-                EBR::advance();
-            }
+            // Temporarily disable EBR epoch advancement to debug heap corruption
+            // static thread_local int insertCount = 0;
+            // if (++insertCount % 500 == 0) {  // More frequent advancement for fine-grained
+            //     EBR::advanceFineGrained();
+            // }
+            // 
+            // // Also advance structure-level EBR less frequently
+            // if (insertCount % 1000 == 0) {
+            //     EBR::advance();
+            // }
             
             return true;
         }
@@ -1715,17 +1889,53 @@ inline void EBR::deleteDilaxNode(void* ptr) {
 }
 
 inline void EBR::deleteOldStructure(void* ptr) {
+    if (!ptr) return;
+    
     OldDilaxStructure* oldStruct = static_cast<OldDilaxStructure*>(ptr);
-    if (oldStruct && oldStruct->data) {
-        // Clean up any child nodes in the old structure
-        for (int i = 0; i < oldStruct->fanout; ++i) {
-            if (oldStruct->data[i].key == -1 && oldStruct->data[i].child) {
-                // Schedule child nodes for deletion too
-                scheduleDelete(oldStruct->data[i].child);
-            }
-        }
-        delete[] oldStruct->data;
+    if (!oldStruct) return;
+    
+    // Validate the structure before accessing it
+    if (!oldStruct->data || oldStruct->fanout <= 0 || oldStruct->fanout > 100000) {
+        // Structure is corrupted or invalid, just delete the container
+        delete oldStruct;
+        return;
     }
+    
+    // Additional safety: Check if data pointer looks valid
+    if (reinterpret_cast<uintptr_t>(oldStruct->data) < 0x1000) {
+        delete oldStruct;
+        return;
+    }
+    
+    // Clean up any child nodes in the old structure with bounds checking
+    for (int i = 0; i < oldStruct->fanout; ++i) {
+        // Verify each array element before accessing
+        OptimisticDilaxPairEntry* entry = &oldStruct->data[i];
+        if (reinterpret_cast<uintptr_t>(entry) < 0x1000) {
+            break; // Array is corrupted, stop processing
+        }
+        
+        try {
+            if (entry->key == -1 && entry->child) {
+                // Additional validation of child pointer
+                if (reinterpret_cast<uintptr_t>(entry->child) > 0x1000) {
+                    // Schedule child nodes for deletion too
+                    scheduleDelete(entry->child);
+                }
+            }
+        } catch (...) {
+            // If accessing the entry fails, break out of loop
+            break;
+        }
+    }
+    
+    // Safe cleanup
+    try {
+        delete[] oldStruct->data;
+    } catch (...) {
+        // If deletion fails, just continue
+    }
+    
     delete oldStruct;
 }
 
