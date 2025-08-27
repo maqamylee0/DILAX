@@ -1,37 +1,14 @@
 #include "DILAX.h"
-#include "../global/linearReg.h"
-#include "../global/global.h"
-#include "../utils/data_utils.h"
 
-#include <iostream>
-#include <vector>
-#include <cmath>
-#include <queue>
-#include <algorithm>
-#include <functional>
-#include <utility>
-#include <cassert>
-#include <thread>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <regex>
-#include <cstdio>
-
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <linux/perf_event.h>
-#include <asm/unistd.h>
+// Define EBR static members (to avoid multiple definitions)
+thread_local uint64_t EBR::localEpoch = 0;
+std::atomic<uint64_t> EBR::globalEpoch{0};
+std::atomic<void*> EBR::pendingDeletes[3] = {nullptr, nullptr, nullptr};
+std::atomic<int> EBR::deleteTypes[3] = {0, 0, 0};
+std::mutex EBR::deleteMutex;
 
 using namespace std;
 
-
-// Define EBR static members to avoid multiple definition errors
-thread_local uint64_t EBR::localEpoch = 0;
-std::atomic<uint64_t> EBR::globalEpoch{1};
-std::atomic<void*> EBR::pendingDeletes[3] = {nullptr, nullptr, nullptr};
-std::mutex EBR::deleteMutex;
 
 // Make dilax auxiliary variables thread-local for concurrent access
 namespace dilax_auxiliary {
